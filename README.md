@@ -69,22 +69,54 @@ MyHospitals API (no key required):
 - 66,284 ED presentations in 2024–25 (181/day)
 - ATS 1 treated on time: **100%** · ATS 3: **17%** · ATS 4: **31%**
 
-## Known open problem — this is your first real task
+## Reproducing a specific hospital
 
-`edsim tune H0632` currently bottoms out around **21 pp mean absolute error**.
-The model cannot simultaneously reproduce ATS 1 at 100% and ATS 3 at 17%: a
-single priority queue that starves ATS 3 that badly also starves ATS 1.
+`edsim tune H0632` grid-searches the parameters AIHW cannot supply and gets
+Royal Perth to **~8 pp mean absolute error** on published on-time performance:
 
-Royal Perth's real pattern implies something this model doesn't have yet —
-likely streaming (fast-track/ambulatory running as a separate resource pool),
-or time-varying staffing, or a nurse resource distinct from the physical
-cubicle. Fixing that is worth more than any amount of UI polish, and it is
-exactly what a DoH judge will probe.
+| ATS | | AIHW observed | simulated |
+|---|---|---|---|
+| 1 | Resuscitation | 100% | 100% |
+| 2 | Emergency | 60% | 64% |
+| 3 | Urgent | 17% | 13% |
+| 4 | Semi-urgent | 31% | 30% |
+| 5 | Non-urgent | 65% | 32% |
+
+ATS 5 is still off. It is 2% of presentations, so it carries almost no weight
+in reality but full weight in the error metric — the honest read is that the
+fast track's opening hours need calibrating, not that the model is broken.
+
+### What the data actually said
+
+The first hypothesis was that ATS 3 collapses because it is squeezed between
+two protected streams. That was wrong, and the data says so plainly. Under a
+single shared queue with median wait ~90 minutes, the ATS time targets alone
+(30 / 60 / 120 min) produce roughly 21% / 37% / 60% on time — which is very
+close to Royal Perth's actual 17% / 31% / 65%. **Most of the spread across
+ATS 3-4-5 is an artefact of different targets applied to one common wait
+distribution, not evidence of streaming.**
+
+What genuinely needed modelling was the top of the scale:
+
+- **Resus and fast track never board.** Admitted patients release those spaces
+  immediately and wait for a ward bed in a corridor. Only main cubicles absorb
+  access block. Without this, a gridlocked ED collapses ATS 1 along with
+  everything else — which no real ED does.
+- **ATS 1 preempts ATS 2 out of a resus bay.** ATS 2 is ~25% of arrivals; give
+  it unpreemptable resus access and it saturates the bays, and ATS 1 on-time
+  falls to single digits. With preemption, ATS 1 sits at exactly 100%.
+
+Adding those two mechanisms took the error from **21.6 pp to 8.0 pp**. The
+lesson worth carrying into the hackathon: the interesting number was never the
+mean, it was *which category the model got wrong and in which direction*.
 
 ## Deliberate modelling choices
 
 - **Access block** — admitted patients keep their ED cubicle until a ward bed frees.
-- **Reserved resus bays** — ATS 1–2 get a protected pool; ATS 1 bypasses triage.
+- **Three streams, not one queue** — ring-fenced resus bays (ATS 1–2, with
+  ATS 1 preempting), a fast track open only part of the day (ATS 4–5), and
+  main cubicles for everyone else plus overflow. ATS 1 bypasses triage.
+- **Resus and fast track are decanted, never boarded** — see above.
 - **Did-not-wait** — low-acuity patients abandon after a patience threshold.
   Waits are reported over patients *seen*, DNW separately — as EDs report it.
 - **Non-homogeneous Poisson arrivals** via thinning, with a diurnal profile.

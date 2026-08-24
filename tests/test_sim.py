@@ -27,11 +27,17 @@ def test_departures_never_precede_arrivals():
     assert (df["wait_to_treat_min"].dropna() >= 0).all()
 
 
-def test_higher_acuity_waits_less():
+def test_higher_acuity_waits_less_within_the_same_stream():
+    """ATS 2 must beat ATS 3 - both compete for main cubicles.
+
+    Deliberately NOT compared against ATS 4/5: those are diverted to the fast
+    track, so they can and do beat ATS 2 on raw wait. That inversion is a real
+    property of a streamed ED, not a bug.
+    """
     df = simulate(_params(), days=20, seed=3)
     seen = df[df["seen_ts"].notna()]
     med = seen.groupby("ats")["wait_to_treat_min"].median()
-    assert med.get(2, 0) <= med.get(5, 1e9)
+    assert med.get(2, 0) <= med.get(3, 1e9)
 
 
 def test_ward_pressure_creates_access_block():

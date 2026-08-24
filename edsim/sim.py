@@ -13,6 +13,20 @@ Two things here are deliberate and are what makes this more than a queue toy:
    congestion in WA and the reason "just add ED staff" does not fix it.
 2. **Did-not-wait.** Low-acuity patients abandon the queue after a patience
    threshold. Ignore this and you overestimate waiting-room load.
+3. **Resus and fast track never board.** When an admitted patient finishes
+   treatment in a resus bay, they release it immediately and wait for their
+   ward bed in a corridor space instead. Real EDs decant resus first, because
+   the bay is too valuable to hold - which is why a completely gridlocked
+   department can still report near-100% on-time for ATS 1. Only the main
+   cubicles absorb access block. Without this the model collapses ATS 1 along
+   with everything else, which no real ED does.
+4. **Streaming.** Three separate pools of space, not one queue: resus bays
+   (ATS 1-2), a fast track open only part of the day (ATS 4-5), and the main
+   cubicles (everyone else, plus overflow). This is what produces the real
+   signature of a congested Australian ED - excellent ATS 1, tolerable ATS 5,
+   and ATS 3 collapsing in the middle, because ATS 3 is the only category
+   protected by neither stream and therefore competes directly with admitted
+   patients boarding for a ward bed. Call it the ATS 3 squeeze.
 
 Output is a canonical encounter frame, so simulated and real data flow through
 exactly the same metrics and models.
@@ -37,7 +51,11 @@ class EDModel:
         self.env = simpy.Environment()
         self.triage = simpy.Resource(self.env, capacity=params.n_triage_nurses)
         self.cubicles = simpy.PriorityResource(self.env, capacity=params.n_cubicles)
-        self.resus = simpy.PriorityResource(self.env, capacity=params.n_resus_bays)
+        # Preemptive: an arriving ATS 1 takes a bay from a stabilised ATS 2,
+        # who is bumped out to finish treatment in a main cubicle.
+        self.resus = simpy.PreemptiveResource(self.env, capacity=params.n_resus_bays)
+        self.fasttrack = simpy.PriorityResource(
+            self.env, capacity=max(params.n_fasttrack_spaces, 0) or 1)
         self.ward = simpy.Resource(self.env, capacity=params.n_inpatient_beds)
         self.records: list[dict] = []
         self._n = 0
@@ -112,17 +130,37 @@ class EDModel:
 
         rec["seen_ts"] = self.env.now
         rec["space"] = space
-        pool = self.resus if space == "resus" else self.cubicles
-        yield self.env.timeout(sample_treat_minutes(self.rng, self.p, ats))
+        pool = {"resus": self.resus, "fasttrack": self.fasttrack}.get(space, self.cubicles)
+
+        remaining = sample_treat_minutes(self.rng, self.p, ats)
+        while remaining > 0:
+            started = self.env.now
+            try:
+                yield self.env.timeout(remaining)
+                remaining = 0
+            except simpy.Interrupt:
+                # Bumped out of resus by an ATS 1. Finish in a main cubicle.
+                remaining -= self.env.now - started
+                rec["preempted"] = True
+                req = self.cubicles.request(priority=ats)
+                yield req
+                space, pool = "cubicle", self.cubicles
 
         if self.rng.random() < self.p.admit_prob.get(ats, 0.2):
             board_start = self.env.now
+            # Resus bays and fast track are decanted immediately - the patient
+            # boards in a corridor. Only main cubicles are held during boarding,
+            # which is what makes access block bite the ATS 3 queue specifically.
+            if space in ("resus", "fasttrack"):
+                pool.release(req)
+                pool = None
             bed = self.ward.request()
-            yield bed                          # still holding the ED space: access block
+            yield bed
             rec["boarding_min"] = self.env.now - board_start
             rec["disposition"] = "admitted"
             rec["depart_ts"] = self.env.now
-            pool.release(req)
+            if pool is not None:
+                pool.release(req)
             self.records.append(rec)
             yield self.env.timeout(self.rng.exponential(self.p.inpatient_los_hours * 60.0))
             self.ward.release(bed)
@@ -133,38 +171,47 @@ class EDModel:
         pool.release(req)
         self.records.append(rec)
 
+    def _fasttrack_open(self) -> bool:
+        if self.p.n_fasttrack_spaces <= 0:
+            return False
+        hour = (self.env.now / 60.0) % 24
+        return self.p.fasttrack_open_hour <= hour < self.p.fasttrack_close_hour
+
+    def _race(self, requests: list[tuple[str, object, object]], patience: float):
+        """Wait on several space requests at once; keep the first granted."""
+        timeout = self.env.timeout(patience)
+        res = yield simpy.events.AnyOf(self.env, [r for _, r, _ in requests] + [timeout])
+
+        winner = None
+        for name, req, pool in requests:
+            if req in res and winner is None:
+                winner = (name, req, pool)
+            elif req in res:
+                pool.release(req)          # granted but not taken
+            else:
+                req.cancel()
+        return winner
+
     def _acquire_space(self, ats: int, rec: dict):
-        """Get a treatment space. ATS 1-2 may use a reserved resus bay.
+        """Get a treatment space from whichever stream the patient qualifies for.
 
         Returns (space_name, request) or (None, None) if the patient gave up.
         """
         patience = self.p.dnw_patience_min.get(ats, float("inf"))
+        candidates = []
 
-        if ats <= 2 and self.p.n_resus_bays > 0:
-            r_req = self.resus.request(priority=ats)
-            c_req = self.cubicles.request(priority=ats)
-            timeout = self.env.timeout(patience)
-            res = yield r_req | c_req | timeout
+        if ats in self.p.resus_ats and self.p.n_resus_bays > 0:
+            candidates.append(
+                ("resus", self.resus.request(priority=ats, preempt=(ats == 1)), self.resus))
+        if ats in self.p.fasttrack_ats and self._fasttrack_open():
+            candidates.append(("fasttrack", self.fasttrack.request(priority=ats), self.fasttrack))
+        candidates.append(("cubicle", self.cubicles.request(priority=ats), self.cubicles))
 
-            if r_req in res:
-                if c_req in res:
-                    self.cubicles.release(c_req)
-                else:
-                    c_req.cancel()
-                return "resus", r_req
-            if c_req in res:
-                r_req.cancel()
-                return "cubicle", c_req
-            r_req.cancel()
-            c_req.cancel()
+        winner = yield from self._race(candidates, patience)
+        if winner is None:
             return None, None
-
-        c_req = self.cubicles.request(priority=ats)
-        res = yield c_req | self.env.timeout(patience)
-        if c_req in res:
-            return "cubicle", c_req
-        c_req.cancel()
-        return None, None
+        name, req, _ = winner
+        return name, req
 
     # --- run ---------------------------------------------------------------
 

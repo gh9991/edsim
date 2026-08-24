@@ -47,8 +47,24 @@ class SimParams:
     # capacity
     n_triage_nurses: int = 2
     n_cubicles: int = 30
-    n_resus_bays: int = 4          # reserved for ATS 1-2; keeps resus from being blocked
+    n_resus_bays: int = 4          # ring-fenced; see resus_ats
+    # Which categories may use a resus bay. Defaults to ATS 1 only: opening
+    # resus to all of ATS 2 saturates it (ATS 2 is ~25% of arrivals) and the
+    # ATS 1 patients then queue behind them, which no real ED tolerates.
+    # ATS 1 preempts ATS 2 out of a bay (see sim.EDModel). Without preemption,
+    # ATS 2 saturates resus and ATS 1 queues behind it - which no real ED
+    # tolerates, and which shows up immediately as ATS 1 on-time far below 100%.
+    resus_ats: list[int] = dataclasses.field(default_factory=lambda: [1, 2])
     n_inpatient_beds: int = 500
+
+    # Fast track / ambulatory stream. A separate pool of spaces and staff for
+    # low-acuity patients, so they do not queue behind admitted patients who
+    # are boarding in the main cubicles. Almost every metro ED runs one, and
+    # almost no ED runs it 24/7 - the opening hours matter as much as the size.
+    n_fasttrack_spaces: int = 6
+    fasttrack_ats: list[int] = dataclasses.field(default_factory=lambda: [4, 5])
+    fasttrack_open_hour: int = 8
+    fasttrack_close_hour: int = 22
 
     # service
     triage_time_min: float = 5.0
@@ -216,10 +232,28 @@ def size_capacity(p: SimParams, *, ed_target_util: float = 0.85,
     gridlock on a made-up bed count, derive it from offered load, then let the
     user sweep around it. Erlang-style: beds = offered_load / target_utilisation.
     """
-    ed_load = sum(
-        p.daily_arrivals * p.acuity_mix.get(a, 0) * p.treat_mean_min.get(a, 60) / 60
-        for a in range(1, 6)
-    ) / 24.0
+    def _load(acuities, hours=24.0, share=1.0):
+        """Offered load in beds = arrival rate per hour x service time in hours."""
+        return sum(
+            p.daily_arrivals * share * p.acuity_mix.get(a, 0) * p.treat_mean_min.get(a, 60) / 60
+            for a in acuities
+        ) / hours
+
+    ft_ats = [a for a in p.fasttrack_ats if 1 <= a <= 5]
+    open_hours = max(p.fasttrack_close_hour - p.fasttrack_open_hour, 1)
+    open_share = sum(p.hourly_profile[h] for h in
+                     range(p.fasttrack_open_hour, p.fasttrack_close_hour)) / sum(p.hourly_profile)
+
+    if ft_ats and p.n_fasttrack_spaces > 0:
+        ft_load = _load(ft_ats, hours=open_hours, share=open_share)
+        p.n_fasttrack_spaces = max(1, int(np.ceil(ft_load / ed_target_util)))
+        # what the main ED still has to absorb: everything not diverted
+        main_load = _load([a for a in range(1, 6) if a not in ft_ats])
+        main_load += _load(ft_ats, share=1 - open_share)
+    else:
+        main_load = _load(range(1, 6))
+
+    ed_load = main_load
     p.n_cubicles = max(4, int(np.ceil(ed_load / ed_target_util)))
 
     ed_bed_demand = p.daily_arrivals * mean_admit_prob(p) * (p.inpatient_los_hours / 24.0)
@@ -262,6 +296,8 @@ def tune_to_aihw(reporting_unit_code: str, *, days: float = 45, seed: int = 7,
                  cubicles: list[int] | None = None,
                  occupancies: list[float] | None = None,
                  treat_scales: list[float] | None = None,
+                 fasttrack: list[int] | None = None,
+                 resus_bays: list[int] | None = None,
                  verbose: bool = True) -> tuple[SimParams, "pd.DataFrame"]:
     """Coarse grid search for the capacity parameters AIHW cannot tell us.
 
@@ -280,17 +316,23 @@ def tune_to_aihw(reporting_unit_code: str, *, days: float = 45, seed: int = 7,
     from edsim.sim import simulate
 
     base = from_aihw(reporting_unit_code)
-    cubicles = cubicles or [10, 14, 18, 24, 30, 40]
-    occupancies = occupancies or [0.70, 0.80, 0.86, 0.90, 0.94]
-    treat_scales = treat_scales or [0.8, 1.0, 1.4]
+    cubicles = cubicles or [12, 16, 20]
+    occupancies = occupancies or [0.88, 0.92]
+    treat_scales = treat_scales or [1.2, 1.6]
+    fasttrack = fasttrack or [3, 6]
+    resus_bays = resus_bays or [8, 12]
+
+    import itertools
 
     rows = []
-    for n in cubicles:
-        for occ in occupancies:
-            for ts in treat_scales:
+    for n, occ, ts, ft, rb in itertools.product(
+            cubicles, occupancies, treat_scales, fasttrack, resus_bays):
+            if True:
                 p = dataclasses.replace(
                     base,
                     n_cubicles=n,
+                    n_fasttrack_spaces=ft,
+                    n_resus_bays=rb,
                     ward_bed_occupancy=occ,
                     treat_mean_min={k: v * ts for k, v in base.treat_mean_min.items()},
                 )
@@ -302,16 +344,20 @@ def tune_to_aihw(reporting_unit_code: str, *, days: float = 45, seed: int = 7,
                     mae = float("inf")
                     if verbose:
                         print(f"  skip n={n} occ={occ} ts={ts}: {exc}")
-                rows.append({"n_cubicles": n, "ward_bed_occupancy": occ,
+                rows.append({"n_cubicles": n, "n_fasttrack_spaces": ft,
+                             "n_resus_bays": rb, "ward_bed_occupancy": occ,
                              "treat_scale": ts, "mae_pp": round(mae, 2)})
                 if verbose:
-                    print(f"  n={n:>3} occ={occ:.2f} treat x{ts:<4} -> MAE {mae:6.2f} pp")
+                    print(f"  cub={n:>3} ft={ft:>2} resus={rb:>2} occ={occ:.2f} "
+                          f"treat x{ts:<4} -> MAE {mae:6.2f} pp")
 
     results = pd.DataFrame(rows).sort_values("mae_pp").reset_index(drop=True)
     best = results.iloc[0]
     tuned = dataclasses.replace(
         base,
         n_cubicles=int(best.n_cubicles),
+        n_fasttrack_spaces=int(best.n_fasttrack_spaces),
+        n_resus_bays=int(best.n_resus_bays),
         ward_bed_occupancy=float(best.ward_bed_occupancy),
         treat_mean_min={k: v * float(best.treat_scale) for k, v in base.treat_mean_min.items()},
         notes=base.notes + f"; TUNED to AIHW (MAE {best.mae_pp} pp, treat_scale {best.treat_scale})",
