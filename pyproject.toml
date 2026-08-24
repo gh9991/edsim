@@ -1,0 +1,24 @@
+[project]
+name = "edsim"
+version = "0.1.0"
+description = "ED patient-flow simulation + prediction skeleton for the WA Health & Care Hackathon 2026"
+requires-python = ">=3.10"
+dependencies = [
+    "simpy>=4.1",
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+edsim = "edsim.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["edsim*"]

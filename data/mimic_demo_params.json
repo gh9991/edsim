@@ -1,0 +1,66 @@
+{
+  "daily_arrivals": 200.0,
+  "hourly_profile": [
+    0.2162,
+    0.3243,
+    0.3243,
+    0.2162,
+    0.4324,
+    0.5405,
+    0.5405,
+    0.2162,
+    0.5405,
+    0.7568,
+    0.6486,
+    1.6216,
+    1.6216,
+    1.0811,
+    1.6216,
+    1.4054,
+    1.9459,
+    1.5135,
+    2.1622,
+    1.5135,
+    1.6216,
+    1.6216,
+    0.8649,
+    0.6486
+  ],
+  "acuity_mix": {
+    "2": 0.46859903381642515,
+    "3": 0.43478260869565216,
+    "1": 0.08695652173913043,
+    "4": 0.00966183574879227
+  },
+  "n_triage_nurses": 2,
+  "n_cubicles": 60,
+  "n_resus_bays": 4,
+  "n_inpatient_beds": 1185,
+  "triage_time_min": 5.0,
+  "treat_mean_min": {
+    "1": 261.89166666666665,
+    "2": 348.5,
+    "3": 398.0,
+    "4": 500.5,
+    "5": 45.0
+  },
+  "treat_cv": 0.6361999851744825,
+  "admit_prob": {
+    "1": 0.9444444444444444,
+    "2": 0.7731958762886598,
+    "3": 0.5222222222222223,
+    "4": 0.0,
+    "5": 0.03
+  },
+  "inpatient_los_hours": 72.0,
+  "ward_bed_occupancy": 0.6,
+  "dnw_patience_min": {
+    "1": 1000000000.0,
+    "2": 1000000000.0,
+    "3": 240.0,
+    "4": 180.0,
+    "5": 150.0
+  },
+  "source": "mimic_demo:data/mimic-iv-ed-demo-2.2",
+  "notes": "daily_arrivals: REJECTED empirical rate 0.007/day over 32,549 days - timestamps are almost certainly date-shifted (MIMIC does this per patient). Kept default 200.0. Set daily_arrivals from a real volume source (e.g. `edsim aihw <code>`) instead.; hourly_profile: empirical; acuity_mix: empirical; treat_mean_min: LOS PROXY (no seen_ts in source) - overstates service time; admit_prob: empirical; capacity: sized for ~85% utilisation -> 60 cubicles, 1185 ward beds (NOT from data - sweep it)"
+}

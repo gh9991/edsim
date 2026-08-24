@@ -1,0 +1,67 @@
+{
+  "daily_arrivals": 181.6,
+  "hourly_profile": [
+    0.55,
+    0.42,
+    0.34,
+    0.29,
+    0.28,
+    0.32,
+    0.45,
+    0.7,
+    1.05,
+    1.35,
+    1.5,
+    1.52,
+    1.45,
+    1.4,
+    1.38,
+    1.35,
+    1.3,
+    1.25,
+    1.2,
+    1.1,
+    1.0,
+    0.9,
+    0.78,
+    0.66
+  ],
+  "acuity_mix": {
+    "1": 0.0336129382656448,
+    "2": 0.2525043751131495,
+    "3": 0.4465180133968982,
+    "4": 0.24729949912497737,
+    "5": 0.020065174099330157
+  },
+  "n_triage_nurses": 2,
+  "n_cubicles": 17,
+  "n_resus_bays": 4,
+  "n_inpatient_beds": 519,
+  "triage_time_min": 5.0,
+  "treat_mean_min": {
+    "1": 180.0,
+    "2": 150.0,
+    "3": 110.0,
+    "4": 70.0,
+    "5": 45.0
+  },
+  "treat_cv": 0.7,
+  "admit_prob": {
+    "1": 0.75,
+    "2": 0.55,
+    "3": 0.3,
+    "4": 0.1,
+    "5": 0.03
+  },
+  "inpatient_los_hours": 72.0,
+  "ward_bed_occupancy": 0.6,
+  "dnw_patience_min": {
+    "1": 1000000000.0,
+    "2": 1000000000.0,
+    "3": 240.0,
+    "4": 180.0,
+    "5": 150.0
+  },
+  "source": "AIHW MyHospitals H0632",
+  "notes": "hospital=Royal Perth Hospital Wellington Street Campus; period_end=2025-06-30; annual_presentations=66,284; AIHW observed on-time % by ATS={1: 100.0, 2: 60.0, 3: 17.0, 4: 31.0, 5: 65.0}; service times + capacity are DEFAULTS - aggregate data cannot inform them"
+}
