@@ -209,7 +209,26 @@ Three limits, stated rather than buried: MIMIC is a US tertiary centre using
 ESI rather than ATS, so this is an indicative magnitude, not a WA estimate.
 MIMIC-IV-ED has no age, and no crowding is computable because every patient is
 date-shifted into a different year — real EDDC has both, so arm A here is
-*weaker* than a true EDDC model and the measured gap is an upper bound.
+*weaker* than a true EDDC model.
+
+That last point makes the measured gap an upper bound, and the claim is
+testable rather than merely plausible. Strengthening the baseline in steps and
+re-measuring what vitals still add:
+
+| Baseline | AUC | + vitals | marginal gain |
+|---|---|---|---|
+| ATS alone | 0.694 | 0.754 | **+0.060** |
+| + sex, arrival mode | 0.731 | 0.769 | **+0.039** |
+| + time features (= arm A) | 0.736 | 0.772 | **+0.036** |
+
+The marginal value of vitals falls monotonically as the baseline improves, at a
+strikingly steady exchange rate (0.58 then 0.56): **every 0.010 of baseline AUC
+consumes about 0.0057 of what the vitals had left to give.** Sex and arrival
+mode already carry part of the signal vitals encode — someone brought in by
+ambulance is more likely to be sick — so the vitals arrive with less that is
+new. Age and crowding would do the same, which is why the +0.093 measured here
+is a ceiling. Two ratio points and a linear extrapolation make that directional,
+not quantitative.
 
 ## Deliberate modelling choices
 
