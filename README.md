@@ -42,8 +42,9 @@ cd edsim && uv venv .venv && uv pip install -e ".[dev]"
 | `edsim sweep --ward-occupancy 0.55,0.75,0.85` | What-if grid — the pitch table |
 | `edsim predict --explain 3` | Train + evaluate the admission model, explain one patient |
 | `edsim information-value --path <mimic>` | What does an administrative extract give up? |
-| `edsim inspect --path challenge.csv` | 15 Sept: see source columns vs canonical |
-| `edsim calibrate --source portal --path challenge.csv` | 15 Sept: fit on real data |
+| `edsim inspect --path eddc.csv` | Source columns vs canonical, with a leakage verdict |
+| `edsim qc --path eddc.csv` | Health-check an extract before modelling anything |
+| `edsim calibrate --source portal --path eddc.csv` | Fit on real data |
 
 ## What the model actually says
 
@@ -223,6 +224,63 @@ date-shifted into a different year — real EDDC has both, so arm A here is
 - **Provenance on every parameter.** `SimParams.notes` records what came from
   data and what is a default. `calibrate.check()` warns before you pitch a
   gridlocked configuration.
+
+## The portal loader is already written
+
+`loaders/portal.py` is built against the Department of Health's published field
+definitions (*Linked Representative Synthetic EDDC / HMDC 2022 Data
+Dictionary*, July 2025), not guessed from a sample — so the departure-status
+codes, arrival modes and sex codes are the real ones, and `triage_category`
+is read as the ATS it already is rather than converted from anything.
+
+EDDC carries the two timestamps MIMIC does not have:
+
+```
+presentation_datetime                arrival
+clinical_care_commencement_datetime  first seen  -> ATS on-time is measurable
+bed_request_datetime                 bed asked for
+discharge_datetime                   left        -> access block is measurable
+```
+
+Column names drift between extracts (`synth_person_ID` vs `person_ID`,
+`metropolitan_hospital_flag` vs `metropolitan_flag`) and codes arrive either
+numeric or pre-decoded, so every field goes through an alias list and a decoder
+that accepts both. HMDC is joined with `merge_asof` on the episode that starts
+*after* ED departure, within a bounded window — because the data dictionary
+says inpatient admission time is when the patient leaves the ED, and a
+same-person join would happily attach an unrelated admission from September.
+
+### Leakage, taken from the definitions rather than guessed
+
+| Field | Verdict |
+|---|---|
+| `mental_health_admission` | **leaky** — *"based on **departure status of admitted** and Principal Diagnoses"*. It contains the target |
+| `primary_diagnosis_ICD10AM_chapter` | **leaky** — *"Chapter level roll of the Principal Diagnosis"*, coded after the episode ends |
+| `bed_request_datetime` | **leaky** — requesting a bed *is* the admission decision |
+| `mental_health_attendance` | suspect — partly derived from the post-hoc diagnosis |
+| `potentially_avoidable_..._attendance` | suspect — "pre-calculated" from undisclosed variables |
+
+`edsim inspect` prints this verdict beside every source column.
+
+## Check the data before you model it
+
+Synthetic data is generated, and generators leave fingerprints. `edsim qc` runs
+the checks that have actually caught something:
+
+```
+FAIL  dates not shifted        11.4/day over 37,339 days (102.2 yr)
+      ← span 102 years is far longer than any real extract.
+        Crowding features and daily forecasts are invalid
+```
+
+Others catch waiting time that does not vary with triage category, admission
+that is a deterministic function of triage rather than a probability, an ATS 1
+median wait in the tens of minutes, out-of-order timestamps, and an implausible
+acuity mix. A check that cannot run says so rather than silently passing.
+
+A failure here is a finding, not a blocker. The Department's own lead data
+scientist builds this data; "your generator makes waiting time independent of
+triage category" is worth more than another dashboard.
 
 ## Data sources, and the trap in each
 

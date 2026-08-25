@@ -177,6 +177,18 @@ def cmd_information_value(args):
     print("                          the arm is already at its statistical limit")
 
 
+def cmd_qc(args):
+    """Health-check an extract before modelling anything with it."""
+    from edsim import dataqc
+    from edsim.loaders import load
+    kw = {"path": args.path}
+    if args.hmdc:
+        kw["hmdc"] = args.hmdc
+    df = load(args.source, **kw)
+    print(f"\n{len(df):,} encounters from {args.path}\n")
+    print(dataqc.report(df))
+
+
 def cmd_demo(args):
     """End-to-end smoke test with zero downloads."""
     from edsim.calibrate import SimParams
@@ -247,6 +259,13 @@ def main(argv=None) -> int:
     s.add_argument("--seed", type=int, default=7)
     s.add_argument("--cohort-size", type=int, default=150, dest="cohort_size")
     s.set_defaults(func=cmd_information_value)
+
+    s = sub.add_parser("qc", help="health-check an extract for generator artefacts")
+    s.add_argument("--source", default="portal",
+                   choices=["portal", "mimic_demo", "synthea"])
+    s.add_argument("--path", required=True)
+    s.add_argument("--hmdc")
+    s.set_defaults(func=cmd_qc)
 
     s = sub.add_parser("inspect", help="show source columns next to canonical ones")
     s.add_argument("--path", required=True)
