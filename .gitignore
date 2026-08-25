@@ -2,17 +2,22 @@
 __pycache__/
 *.egg-info/
 .pytest_cache/
+.DS_Store
 
-# AIHW response cache - regenerate with `edsim units`
-data/aihw_cache/
+# ── data/ is DENY-BY-DEFAULT ────────────────────────────────────────────
+# Everything under data/ is ignored unless explicitly allowed below.
+# This directory holds MIMIC extracts (PhysioNet DUA: no redistribution),
+# WA Health Hackathon portal data (sponsor terms), and anything else that
+# must never leave this machine. A new file type dropped in here is ignored
+# automatically rather than silently becoming committable.
+data/**
+!data/.gitkeep
+!data/*_params.json      # fitted SimParams - aggregate numbers only, no records
 
-# NEVER commit hackathon portal data or MIMIC extracts.
-# Both are supplied under terms that forbid redistribution.
-data/portal/
-data/mimic*/
-data/mimic*.zip
-data/synthea/
+# Nothing patient-level anywhere in the tree, whatever it gets called.
 *.csv
 *.csv.gz
 *.parquet
-!data/*_params.json
+*.xlsx
+*.dta
+*.sav
