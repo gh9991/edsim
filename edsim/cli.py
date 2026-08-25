@@ -161,6 +161,22 @@ def cmd_predict(args):
                model.explain_patient(m, test, i=args.explain).to_string(index=False))
 
 
+def cmd_information_value(args):
+    """How much does EDDC give up by not recording clinical data?"""
+    from edsim import information_value as iv
+    from edsim.loaders import load
+
+    df = load(args.source, path=args.path)
+    res = iv.run(df, seed=args.seed, cohort_size=args.cohort_size)
+    cols = ["name", "n_features", "auc", "auc_gain_vs_A", "pr_auc", "brier",
+            "calibration_bias", "cohort_mae_pct", "cohort_floor_pct",
+            "excess_over_floor_pct"]
+    _print("A / B / C comparison", res[cols].to_string(index=False))
+    print("\n  auc_gain_vs_A         : value of clinical data for RANKING patients")
+    print("  excess_over_floor_pct : value for COUNTING beds - near zero means")
+    print("                          the arm is already at its statistical limit")
+
+
 def cmd_demo(args):
     """End-to-end smoke test with zero downloads."""
     from edsim.calibrate import SimParams
@@ -222,6 +238,15 @@ def main(argv=None) -> int:
     s.add_argument("--explain", type=int, metavar="ROW",
                    help="explain the prediction for this test-set row")
     s.set_defaults(func=cmd_predict)
+
+    s = sub.add_parser("information-value",
+                       help="quantify what EDDC loses by not recording vitals")
+    s.add_argument("--source", default="mimic_demo",
+                   choices=["mimic_demo", "synthea", "portal"])
+    s.add_argument("--path", required=True)
+    s.add_argument("--seed", type=int, default=7)
+    s.add_argument("--cohort-size", type=int, default=150, dest="cohort_size")
+    s.set_defaults(func=cmd_information_value)
 
     s = sub.add_parser("inspect", help="show source columns next to canonical ones")
     s.add_argument("--path", required=True)
