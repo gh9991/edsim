@@ -40,6 +40,7 @@ cd edsim && uv venv .venv && uv pip install -e ".[dev]"
 | `edsim tune H0632 --out data/p.json` | Grid search the params AIHW can't tell us |
 | `edsim simulate --params data/p.json --hourly` | Run it |
 | `edsim sweep --ward-occupancy 0.55,0.75,0.85` | What-if grid — the pitch table |
+| `edsim predict --explain 3` | Train + evaluate the admission model, explain one patient |
 | `edsim inspect --path challenge.csv` | 15 Sept: see source columns vs canonical |
 | `edsim calibrate --source portal --path challenge.csv` | 15 Sept: fit on real data |
 
@@ -109,6 +110,57 @@ What genuinely needed modelling was the top of the scale:
 Adding those two mechanisms took the error from **21.6 pp to 8.0 pp**. The
 lesson worth carrying into the hackathon: the interesting number was never the
 mean, it was *which category the model got wrong and in which direction*.
+
+## Predicting admission — and why that is two different problems
+
+The 2025 Department of Health challenge asked two things that sound alike:
+
+> *"Which types of patients arriving at an ED will require hospital beds?"*
+> *"Predict the **number** of inpatient admissions from ED triage."*
+
+The first is a ranking problem — AUC is the right metric. The second is a
+count forecast, where ranking is irrelevant and **calibration is everything**,
+because expected bed demand is just the sum of the predicted probabilities. A
+model can post a great AUC and still be useless to a bed manager. Most teams
+will report AUC and stop. `edsim predict` reports both, and treats the daily
+bed error as the headline:
+
+```
+                       auc: 0.708      <- which patients
+                     brier: 0.189
+          calibration_bias: 0.013      <- how many
+            daily_mae_beds: 5.36       <- against 51 admissions/day
+```
+
+Also deliberate:
+
+- **Leakage guard.** `features.LEAKY` names every column that only exists once
+  the visit is over (`los_min`, `disposition`, `boarding_min`, …) and
+  `assert_no_leakage` refuses to build a matrix containing one. The fastest way
+  to a 0.99 AUC and a wrecked Q&A session is training on the outcome.
+- **Temporal split, never random.** Train on the earliest slice, calibrate on
+  the next, test on the latest. ED behaviour drifts; a random split lets the
+  model see the future.
+- **Crowding as a feature.** `ed_census_on_arrival` and
+  `waiting_room_on_arrival` are reconstructed from earlier patients only. How
+  busy the department already is, is knowable in real time and is what makes
+  this an operational model rather than a clinical one.
+- **Per-patient explanation.** `explain_patient` shifts each feature to the
+  cohort median and reports what moves: *"ATS 4 rather than 3 — that alone
+  takes this patient from 39% to 13%."* The 2024 Technical Achievement prize
+  went to a team whose clinicians could drill into exactly that.
+
+### How we know the pipeline works without real data
+
+In the simulator, admission probability depends on **nothing but ATS**. That
+puts a hard information ceiling on AUC, computable in closed form. The model
+lands at **0.708 against a ceiling of 0.724** — near the bound, and a test
+asserts it never exceeds it, because exceeding it would mean something leaked.
+It also assigns ~zero importance to every other feature, correctly recovering
+the generating mechanism rather than inventing signal.
+
+That is the whole point of building this before the data arrives: on 15
+September the loader changes and everything above runs unaltered.
 
 ## Deliberate modelling choices
 

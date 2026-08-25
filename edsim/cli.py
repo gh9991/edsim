@@ -133,6 +133,34 @@ def cmd_tune(args):
         print(f"\nwrote {args.out} - now run: edsim simulate --params {args.out}")
 
 
+def cmd_predict(args):
+    """Train and evaluate the admission model on whatever source you point at."""
+    from edsim import model
+    from edsim.loaders import load
+
+    if args.source == "sim":
+        import dataclasses
+        from edsim.calibrate import from_aihw, size_capacity
+        from edsim.sim import simulate
+        p = size_capacity(dataclasses.replace(
+            from_aihw(args.code), n_cubicles=16, n_fasttrack_spaces=3,
+            n_resus_bays=12, ward_bed_occupancy=0.88))
+        df = simulate(p, days=args.days, seed=args.seed)
+        print(f"simulated {len(df):,} encounters from {p.source}")
+    else:
+        df = load(args.source, path=args.path)
+        print(f"loaded {len(df):,} encounters from {args.source}")
+
+    m, test = model.train(df, seed=args.seed)
+    _print("model", {"notes": m.notes, "features": ", ".join(m.feature_names)})
+    _print("evaluation", model.evaluate(m, test))
+    _print("calibration by decile", model.calibration_table(m, test).to_string(index=False))
+    _print("permutation importance", model.importances(m, test).head(10).to_string(index=False))
+    if args.explain:
+        _print(f"why patient {args.explain}?",
+               model.explain_patient(m, test, i=args.explain).to_string(index=False))
+
+
 def cmd_demo(args):
     """End-to-end smoke test with zero downloads."""
     from edsim.calibrate import SimParams
@@ -183,6 +211,17 @@ def main(argv=None) -> int:
     s.add_argument("--seed", type=int, default=7)
     s.add_argument("--out")
     s.set_defaults(func=cmd_tune)
+
+    s = sub.add_parser("predict", help="train + evaluate the admission model")
+    s.add_argument("--source", default="sim",
+                   choices=["sim", "mimic_demo", "synthea", "portal"])
+    s.add_argument("--path", help="required for file-based sources")
+    s.add_argument("--code", default="H0632", help="AIHW unit code when source=sim")
+    s.add_argument("--days", type=float, default=180)
+    s.add_argument("--seed", type=int, default=11)
+    s.add_argument("--explain", type=int, metavar="ROW",
+                   help="explain the prediction for this test-set row")
+    s.set_defaults(func=cmd_predict)
 
     s = sub.add_parser("inspect", help="show source columns next to canonical ones")
     s.add_argument("--path", required=True)
