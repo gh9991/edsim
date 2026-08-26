@@ -79,3 +79,41 @@ def test_checks_are_skippable_not_crashable():
     df = _frame().drop(columns=["seen_ts"])
     findings = dataqc.health_check(df)
     assert len(findings) == len(dataqc.CHECKS)
+
+
+def test_verify_official_eddc_catches_an_imitation(tmp_path):
+    """A dataset that mimics the schema but ignores the codebook. Ages 1-99
+    instead of five-year brackets, HOSP_n instead of an encrypted four-digit
+    code, free text where numeric codes belong, and a ready-made target."""
+    import pandas as pd
+    from edsim.dataqc import verify_official_eddc
+
+    fake = pd.DataFrame({
+        "person_ID": ["1", "2"],
+        "age": [92, 37],
+        "establishment_code": ["HOSP_4", "HOSP_1"],
+        "departure_status": ["Admitted to hospital", "Discharged"],
+        "mode_of_arrival": ["Ambulance", "Self"],
+        "presentation_datetime": ["2022-01-01 00:00", "2022-01-01 01:00"],
+        "is_admitted": [1, 0],
+    })
+    findings = {f.check: f for f in verify_official_eddc(fake)}
+    assert not findings["age in 5-year brackets"].passed
+    assert not findings["establishment code is 4 digits"].passed
+    assert not findings["departure_status uses the 12 codes"].passed
+    assert not findings["no columns outside the dictionary"].passed
+
+
+def test_verify_official_eddc_passes_a_conforming_extract(tmp_path):
+    import pandas as pd
+    from edsim.dataqc import verify_official_eddc
+
+    real = pd.DataFrame({
+        "synth_person_ID": ["S1", "S2"],
+        "age": [60, 35],                       # 5-year brackets
+        "establishment_code": [8005.0, 8009.0],  # 4 digits
+        "departure_status": [1.0, 2.0],
+        "mode_of_arrival": [3.0, 1.0],
+        "presentation_datetime": ["2022-01-01 00:00", "2022-01-01 01:00"],
+    })
+    assert all(f.passed for f in verify_official_eddc(real))

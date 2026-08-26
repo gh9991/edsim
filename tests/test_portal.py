@@ -63,8 +63,26 @@ def test_departure_status_codes_decode(tmp_path):
     df = portal.load_eddc(_eddc(tmp_path)).sort_values("arrival_ts")
     assert df["disposition"].tolist() == [
         "admitted", "discharged", "did_not_wait", "admitted"]
-    # ED observation ward (10) still consumes a bed
-    assert df["needs_bed"].tolist() == [True, False, False, True]
+
+
+def test_needs_bed_definition_is_a_choice_not_a_default(tmp_path):
+    """A Short Stay Unit bed belongs to the ED, not the ward, so it counts
+    under ANY_ADMIT and not under WARD_BED. The fixture's fourth row is
+    departure_status 10."""
+    p = _eddc(tmp_path)
+    ward = portal.load_eddc(p, needs_bed="WARD_BED").sort_values("arrival_ts")
+    anyad = portal.load_eddc(p, needs_bed="ANY_ADMIT").sort_values("arrival_ts")
+
+    assert ward["needs_bed"].tolist() == [True, False, False, False]
+    assert anyad["needs_bed"].tolist() == [True, False, False, True]
+    assert ward["ssu"].tolist() == [False, False, False, True]
+
+
+def test_ssu_is_flagged_for_the_neat_gaming_check(tmp_path):
+    """Code 10 lets a patient administratively leave the ED without leaving
+    the building - the flag exists so the four-hour spike can be looked for."""
+    df = portal.load_eddc(_eddc(tmp_path))
+    assert df["ssu"].sum() == 1
 
 
 def test_numeric_codes_and_decoded_text_both_work(tmp_path):

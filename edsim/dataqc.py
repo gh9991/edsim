@@ -129,6 +129,71 @@ def _boarding_non_negative(df: pd.DataFrame) -> Finding:
                    f"{len(b):,} boarded, median {b.median():.0f} min, {neg} negative")
 
 
+def verify_official_eddc(raw: pd.DataFrame) -> list[Finding]:
+    """Does this extract actually follow the published EDDC dictionary?
+
+    Run this on the raw file before mapping anything. It caught a dataset that
+    imitated the schema loosely but ignored the codebook entirely - ages 1-99
+    instead of five-year brackets, `HOSP_1` instead of an encrypted four-digit
+    establishment code, three free-text departure statuses instead of twelve
+    numeric ones, and a ready-made `is_admitted` column that does not exist in
+    the real collection. Every statistic computed on it was worthless.
+
+    Pass `raw` straight from read_csv, not the canonical frame.
+    """
+    from edsim.loaders.portal import (DEPARTURE_STATUS, EDDC_ALIASES,
+                                      MODE_OF_ARRIVAL)
+    out = []
+
+    def col(name):
+        for c in raw.columns:
+            if c.lower() == name.lower():
+                return raw[c]
+        return None
+
+    # Ages are published in five-year brackets shown as the bracket minimum.
+    age = col("age")
+    if age is not None:
+        a = pd.to_numeric(age, errors="coerce").dropna()
+        off = a[a % 5 != 0]
+        out.append(Finding("age in 5-year brackets", off.empty,
+                           f"{len(off):,}/{len(a):,} values not multiples of 5"
+                           + ("" if off.empty else f", e.g. {sorted(off.unique())[:6]}")))
+
+    # Establishment code is a four-digit number, encrypted.
+    est = col("establishment_code")
+    if est is not None:
+        v = est.dropna().astype(str).str.replace(r"\.0$", "", regex=True)
+        ok = v.str.fullmatch(r"\d{4}").mean() > 0.95
+        out.append(Finding("establishment code is 4 digits", ok,
+                           f"e.g. {sorted(v.unique())[:4]}"))
+
+    # Departure status is one of twelve numeric codes.
+    ds = col("departure_status")
+    if ds is not None:
+        num = pd.to_numeric(ds, errors="coerce")
+        known = num.isin(list(DEPARTURE_STATUS)).mean()
+        out.append(Finding("departure_status uses the 12 codes", known > 0.95,
+                           f"{known:.0%} of values are known codes; "
+                           f"{num.dropna().nunique()} distinct"
+                           + ("" if known > 0.95 else f", sample {list(ds.dropna().unique())[:3]}")))
+
+    ma = col("mode_of_arrival")
+    if ma is not None:
+        num = pd.to_numeric(ma, errors="coerce")
+        known = num.isin(list(MODE_OF_ARRIVAL)).mean()
+        out.append(Finding("mode_of_arrival uses the 10 codes", known > 0.95,
+                           f"{known:.0%} known"))
+
+    expected = {a for al in EDDC_ALIASES.values() for a in al}
+    present = {c.lower() for c in raw.columns}
+    unknown = sorted(c for c in raw.columns
+                     if c.lower() not in {e.lower() for e in expected})
+    out.append(Finding("no columns outside the dictionary", not unknown,
+                       f"unexpected: {unknown}" if unknown else "all recognised"))
+    return out
+
+
 CHECKS = [
     _timestamps_are_ordered,
     _arrivals_per_day_plausible,

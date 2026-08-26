@@ -95,11 +95,38 @@ DEPARTURE_TO_DISPOSITION = {
     10: "admitted", 14: "other", 19: "admitted", 20: "other",
 }
 
-# Which departure statuses mean "this patient consumed an inpatient bed".
-# A modelling choice, so it is named and adjustable rather than buried:
-# ward admission, ED observation ward, transfer *for admission*, and
-# discharged-after-admission all consume a bed somewhere.
-NEEDS_BED_CODES = frozenset({1, 3, 10, 19})
+# "Needs a bed" has no single right answer - it depends on the question, so the
+# options are named rather than one being buried in the code.
+#
+#   WARD_BED   beds in this hospital's wards. The right label for forecasting
+#              ward demand: an ED Short Stay Unit bed (10) belongs to the ED,
+#              and a transfer (3) consumes another hospital's bed.
+#   ANY_ADMIT  anyone who ends up with admitted status anywhere, including SSU
+#              and Hospital in the Home.
+#   BLOCKED    the two outcomes that wait on a resource outside the ED's
+#              control - the access-block population.
+#
+# ⚠️ The dictionary contradicts itself here. Permitted values list 1 and 10
+# separately, but the worked example maps "admitted as they require further
+# medical care" to "1 - Admitted to the hospital (SSU / HITH / ward)". So sites
+# may well code Short Stay Unit as either. Check the per-hospital split of 1 vs
+# 10 before trusting any of these labels.
+NEEDS_BED_DEFS = {
+    "WARD_BED":  frozenset({1, 19}),
+    "ANY_ADMIT": frozenset({1, 3, 10, 14, 19}),
+    "BLOCKED":   frozenset({1, 3}),
+}
+NEEDS_BED_CODES = NEEDS_BED_DEFS["WARD_BED"]
+
+# Code 10 is the NEAT pressure valve. A patient moved into the Short Stay Unit
+# has administratively "departed the ED" while remaining in the same building.
+# Plot time-to-departure for these and look for a spike just under four hours.
+SSU_CODE = 10
+
+# 4 = never seen by a clinician; 5 = seen, then left before the episode closed.
+# So code 4 should have a null clinical_care_commencement_datetime and code 5
+# should not - a free consistency check on any extract.
+DNW_BEFORE_CARE, LEFT_AFTER_CARE = 4, 5
 
 MODE_OF_ARRIVAL = {
     1: "private transport", 2: "public transport", 3: "ambulance",
@@ -164,7 +191,8 @@ def _read(path: str | pathlib.Path, **kw) -> pd.DataFrame:
     return pd.read_csv(path, low_memory=False, **kw)
 
 
-def load_eddc(path, *, strict: bool = True, **kw) -> pd.DataFrame:
+def load_eddc(path, *, strict: bool = True, needs_bed: str = "WARD_BED",
+              **kw) -> pd.DataFrame:
     """EDDC extract -> canonical encounters."""
     raw = _read(path, **kw)
     out = pd.DataFrame(index=raw.index)
@@ -190,7 +218,9 @@ def load_eddc(path, *, strict: bool = True, **kw) -> pd.DataFrame:
               else pd.Series(index=out.index, dtype=float))
     ds = pd.to_numeric(ds_raw, errors="coerce")
     out["disposition"] = ds.map(DEPARTURE_TO_DISPOSITION).fillna("other")
-    out["needs_bed"] = ds.isin(NEEDS_BED_CODES)
+    out["needs_bed"] = ds.isin(NEEDS_BED_DEFS[needs_bed])
+    out["needs_bed_def"] = needs_bed
+    out["ssu"] = ds.eq(SSU_CODE)
     out["departure_status_label"] = ds.map(DEPARTURE_STATUS)
 
     if "sex" in out:
