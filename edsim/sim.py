@@ -43,6 +43,27 @@ from edsim.calibrate import SimParams, sample_treat_minutes
 EPOCH = pd.Timestamp("2026-09-19 00:00:00")
 
 
+def _probit(p: float) -> float:
+    """Inverse standard normal CDF (Acklam's rational approximation)."""
+    a = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
+         1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00]
+    b = [-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
+         6.680131188771972e+01, -1.328068155288572e+01]
+    c = [-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
+         -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00]
+    d = [7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00,
+         3.754408661907416e+00]
+    pl, ph = 0.02425, 1 - 0.02425
+    if p < pl:
+        q = (-2 * np.log(p)) ** 0.5
+        return (((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) / ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1)
+    if p > ph:
+        q = (-2 * np.log(1 - p)) ** 0.5
+        return -(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) / ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1)
+    q, r = p - 0.5, (p - 0.5) ** 2
+    return (((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5])*q / (((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1)
+
+
 class EDModel:
     def __init__(self, params: SimParams, *, seed: int = 7, warm_up_hours: float = 24.0):
         self.p = params
@@ -56,8 +77,14 @@ class EDModel:
         self.resus = simpy.PreemptiveResource(self.env, capacity=params.n_resus_bays)
         self.fasttrack = simpy.PriorityResource(
             self.env, capacity=max(params.n_fasttrack_spaces, 0) or 1)
-        self.ward = simpy.Resource(self.env, capacity=params.n_inpatient_beds)
+        # Priority = the moment the bed was asked for. Requesting at triage
+        # buys a place in the queue, not a bed held empty while the patient is
+        # still being treated - which is what actually happens, and modelling
+        # it the other way makes early requests catastrophically bad for a
+        # reason that has nothing to do with reality.
+        self.ward = simpy.PriorityResource(self.env, capacity=params.n_inpatient_beds)
         self.records: list[dict] = []
+        self.background_waits: list[float] = []
         self._n = 0
 
     # --- demand ------------------------------------------------------------
@@ -83,7 +110,11 @@ class EDModel:
 
     def _background_admissions(self):
         """Non-ED demand on ward beds (elective, transfers) holding occupancy."""
-        target = self.p.n_inpatient_beds * self.p.ward_bed_occupancy
+        # Total target occupancy minus what ED admissions will hold themselves.
+        from edsim.calibrate import mean_admit_prob
+        ed_beds = (self.p.daily_arrivals * mean_admit_prob(self.p)
+                   * self.p.inpatient_los_hours / 24.0)
+        target = max(self.p.n_inpatient_beds * self.p.ward_bed_occupancy - ed_beds, 0.0)
         rate_per_hour = target / max(self.p.inpatient_los_hours, 1.0)
         # pre-load the wards so we do not start the day with an empty hospital
         for _ in range(int(target)):
@@ -95,8 +126,18 @@ class EDModel:
                 self.rng.exponential(self.p.inpatient_los_hours * 60.0)))
 
     def _ward_stay(self, minutes: float):
-        with self.ward.request() as req:
+        """Non-ED demand: elective, direct and transfer admissions.
+
+        They queue on the same beds with a priority of 'now', so an ED patient
+        who claimed a position at triage outranks an elective admission that
+        appeared later. This is the actual mechanism by which early requesting
+        helps, and it is a transfer between demand streams rather than new
+        capacity - which is why the elective wait is reported too.
+        """
+        with self.ward.request(priority=self.env.now) as req:
+            t0 = self.env.now
             yield req
+            self.background_waits.append(self.env.now - t0)
             yield self.env.timeout(minutes)
 
     # --- patient pathway ---------------------------------------------------
@@ -120,6 +161,19 @@ class EDModel:
                 yield req
                 yield self.env.timeout(self.rng.exponential(self.p.triage_time_min))
             rec["triage_ts"] = self.env.now
+
+        # Will this patient actually need a bed? Decided now so the predictor
+        # can be scored against it, but not revealed to the ED until treatment
+        # finishes - exactly as in reality.
+        truly_admitted = self.rng.random() < self.p.admit_prob.get(ats, 0.2)
+        rec["truly_admitted"] = truly_admitted
+
+        claim_ts = None
+        if self.p.bed_request_policy == "at_triage" and \
+                self._predict_admission(truly_admitted) > 0.5:
+            rec["early_request"] = True
+            rec["wasted_request"] = not truly_admitted
+            claim_ts = self.env.now                      # queue position, not a bed
 
         space, req = yield from self._acquire_space(ats, rec)
         if req is None:                       # abandoned the queue
@@ -146,7 +200,7 @@ class EDModel:
                 yield req
                 space, pool = "cubicle", self.cubicles
 
-        if self.rng.random() < self.p.admit_prob.get(ats, 0.2):
+        if truly_admitted:
             board_start = self.env.now
             # Resus bays and fast track are decanted immediately - the patient
             # boards in a corridor. Only main cubicles are held during boarding,
@@ -154,7 +208,10 @@ class EDModel:
             if space in ("resus", "fasttrack"):
                 pool.release(req)
                 pool = None
-            bed = self.ward.request()
+            # If the request went in at triage, the queue position is already
+            # held and the wait may be over before treatment even finished.
+            bed = self.ward.request(priority=claim_ts if claim_ts is not None
+                                    else self.env.now)
             yield bed
             rec["boarding_min"] = self.env.now - board_start
             rec["disposition"] = "admitted"
@@ -166,10 +223,35 @@ class EDModel:
             self.ward.release(bed)
             return
 
+        # Not admitted after all. Any bed requested at triage was a false
+        # positive: it held a queue slot a real admission could have used.
         rec["disposition"] = "discharged"
         rec["depart_ts"] = self.env.now
         pool.release(req)
         self.records.append(rec)
+
+    def _predict_admission(self, truth: bool) -> float:
+        """Stand-in for the triage-time model, parameterised by target AUC.
+
+        A latent normal score: N(d, 1) if the patient really needs a bed,
+        N(0, 1) if not. Separation d = sqrt(2) * Phi^-1(AUC), which reproduces
+        the requested AUC exactly. The score is squashed to (0, 1) so the
+        threshold reads like a probability.
+
+        The earlier version mixed truth with uniform noise, which separates
+        *perfectly* for any skill above 0.5 - so "skill 0.7" and an oracle
+        gave identical results. Worth recording: a predictor stub that cannot
+        make mistakes silently turns the whole experiment into a best case.
+        """
+        from math import sqrt
+        auc = min(max(self.p.predictor_skill, 0.5), 0.9999)
+        d = sqrt(2) * _probit(auc)
+        z = self.rng.normal(d if truth else 0.0, 1.0)
+        # Threshold expressed as the false-positive rate we accept, not as a
+        # probability: Phi(N(0,1)) is uniform, so thresholding it at 0.5 flags
+        # half of all non-admissions no matter how good the model is.
+        z_star = _probit(1 - self.p.early_request_fpr)
+        return 1.0 if z >= z_star else 0.0
 
     def _fasttrack_open(self) -> bool:
         if self.p.n_fasttrack_spaces <= 0:

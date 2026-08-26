@@ -77,10 +77,38 @@ class SimParams:
     # access block: how long an admitted patient holds an ED cubicle waiting
     # for a ward bed. This is the WA system's actual pain point.
     inpatient_los_hours: float = 72.0
-    # Share of ward beds held by NON-ED admissions (elective, transfers).
-    # ED admissions compete for the remaining (1 - this) of the ward.
-    # WA's access-block problem lives in this single number - sweep it.
-    ward_bed_occupancy: float = 0.60
+    # TARGET TOTAL ward occupancy, ED admissions included. The simulator
+    # generates only the non-ED remainder as background demand, so this number
+    # means what a hospital executive means by "we run at 92%".
+    #
+    # Previously this was documented as the non-ED share while size_capacity
+    # treated it as the total, so background demand and ED demand were counted
+    # twice and every configuration came out unstable. WA's access-block
+    # problem lives in this single number, so it had better mean one thing.
+    ward_bed_occupancy: float = 0.92
+
+    # What fraction of all inpatient admissions arrive via the ED. Sets how big
+    # the ward has to be relative to ED demand. 50-70% is typical for a metro
+    # hospital; the rest are elective, direct and transfer admissions.
+    ed_share_of_admissions: float = 0.60
+
+    # Bed-request policy. "on_decision" is current practice: the request goes in
+    # once the doctor has finished working the patient up. "at_triage" issues it
+    # the moment triage predicts admission, so the coordination runs in parallel
+    # with treatment instead of after it.
+    #
+    # The catch, and the reason prediction quality matters operationally: a
+    # request issued at triage for a patient who turns out NOT to need a bed
+    # holds a queue position that a real admission needed. Sensitivity and
+    # specificity stop being abstract and start costing beds.
+    bed_request_policy: str = "on_decision"      # or "at_triage"
+    # Operating point for the early-request rule, as an accepted false-positive
+    # rate. 0.10 = flag 10% of patients who will not need a bed.
+    early_request_fpr: float = 0.10
+    # Quality of the triage-time predictor, given as its AUC. 0.5 = coin flip,
+    # 0.83 = what we actually measured on MIMIC with vitals + chief complaint,
+    # 0.99 ~ oracle.
+    predictor_skill: float = 0.83
 
     # behaviour
     dnw_patience_min: dict[int, float] = dataclasses.field(
@@ -256,9 +284,18 @@ def size_capacity(p: SimParams, *, ed_target_util: float = 0.85,
     ed_load = main_load
     p.n_cubicles = max(4, int(np.ceil(ed_load / ed_target_util)))
 
+    # Ward sizing. The earlier version required ED demand to fit inside the
+    # slice of beds NOT held by anyone else, which for a 90%-occupied hospital
+    # implies a ward ten times larger than any real one - Royal Perth has
+    # roughly 450 beds, not 1,700. A pool that large also never queues, so
+    # boarding came out at zero however hard the hospital was pushed.
+    #
+    # ED admissions are typically 50-70% of all admissions at a metro hospital,
+    # so total bed demand is ED demand divided by that share, and the ward is
+    # sized to carry it at the target occupancy.
     ed_bed_demand = p.daily_arrivals * mean_admit_prob(p) * (p.inpatient_los_hours / 24.0)
-    free_share = max(1.0 - p.ward_bed_occupancy, 0.05)
-    p.n_inpatient_beds = max(10, int(np.ceil(ed_bed_demand / (free_share * ward_target_util))))
+    total_demand = ed_bed_demand / max(p.ed_share_of_admissions, 0.05)
+    p.n_inpatient_beds = max(10, int(np.ceil(total_demand / max(p.ward_bed_occupancy, 0.5))))
     return p
 
 
