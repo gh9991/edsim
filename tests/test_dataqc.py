@@ -7,8 +7,18 @@ from edsim import dataqc, schema
 def _frame(n=4000, seed=0, **override):
     rng = np.random.default_rng(seed)
     ats = rng.choice([1, 2, 3, 4, 5], n, p=[0.01, 0.18, 0.42, 0.34, 0.05])
-    arrive = pd.Timestamp("2022-01-01") + pd.to_timedelta(
-        np.sort(rng.uniform(0, 365 * 24 * 60, n)), unit="m")
+    # Arrivals with a realistic diurnal shape - a uniform hour would itself
+    # trip the diurnal check, which is the point of that check existing.
+    profile = np.array([.55, .42, .34, .29, .28, .32, .45, .70, 1.05, 1.35, 1.50,
+                        1.52, 1.45, 1.40, 1.38, 1.35, 1.30, 1.25, 1.20, 1.10,
+                        1.00, .90, .78, .66])
+    days = rng.integers(0, 365, n)
+    hours = rng.choice(24, n, p=profile / profile.sum())
+    arrive = (pd.Timestamp("2022-01-01")
+              + pd.to_timedelta(days, unit="D")
+              + pd.to_timedelta(hours, unit="h")
+              + pd.to_timedelta(rng.uniform(0, 60, n), unit="m")).sort_values()
+    arrive = pd.Series(arrive).reset_index(drop=True)
     wait = pd.Series({1: 0.5, 2: 8, 3: 40, 4: 70, 5: 90}).reindex(ats).to_numpy() \
         * rng.lognormal(0, 0.3, n)
     admit_p = pd.Series({1: .75, 2: .55, 3: .30, 4: .10, 5: .03}).reindex(ats).to_numpy()
@@ -117,3 +127,24 @@ def test_verify_official_eddc_passes_a_conforming_extract(tmp_path):
         "presentation_datetime": ["2022-01-01 00:00", "2022-01-01 01:00"],
     })
     assert all(f.passed for f in verify_official_eddc(real))
+
+
+def test_catches_one_distribution_shared_by_every_acuity():
+    """The imitation dataset's tell: identical spread, not just identical
+    centre, across all five categories."""
+    df = _frame()
+    rng = np.random.default_rng(1)
+    same = rng.normal(32, 16, len(df))          # one distribution for everyone
+    df["seen_ts"] = df["arrival_ts"] + pd.to_timedelta(np.abs(same), unit="m")
+    df = schema.validate(df)
+    assert not _named(df, "wait distribution varies by acuity").passed
+
+
+def test_catches_uniform_arrival_hours():
+    df = _frame(n=5000)
+    rng = np.random.default_rng(2)
+    base = pd.Timestamp("2022-01-01")
+    df["arrival_ts"] = base + pd.to_timedelta(
+        np.sort(rng.uniform(0, 365 * 24 * 60, len(df))), unit="m")
+    df = schema.validate(df)
+    assert not _named(df, "arrivals follow a diurnal cycle").passed

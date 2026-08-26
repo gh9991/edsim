@@ -110,6 +110,44 @@ def _arrivals_per_day_plausible(df: pd.DataFrame) -> Finding:
                       + ". Crowding features and daily forecasts are invalid"))
 
 
+def _wait_distribution_differs_by_acuity(df: pd.DataFrame) -> Finding:
+    """Stronger than comparing medians: are the *distributions* distinct?
+
+    A generator that draws waiting time from one distribution regardless of
+    triage category gives every category the same spread as well as the same
+    centre. One imitation dataset had a standard deviation of exactly 16.2
+    minutes in all five categories - a tell that no amount of renaming or
+    decoding could have produced, and that a generator fitted to real data
+    would never produce either.
+    """
+    if "wait_to_treat_min" not in df or df["wait_to_treat_min"].notna().sum() == 0:
+        return Finding("wait distribution varies by acuity", True,
+                       "not checkable - no first-contact time")
+    g = df.dropna(subset=["wait_to_treat_min"]).groupby("ats")["wait_to_treat_min"]
+    med, sd = g.median(), g.std()
+    if len(med) < 3:
+        return Finding("wait distribution varies by acuity", True, "too few categories")
+    med_spread = med.max() - med.min()
+    sd_spread = sd.max() - sd.min()
+    ok = med_spread > 10 or sd_spread > 5
+    return Finding("wait distribution varies by acuity", ok,
+                   f"median spread {med_spread:.0f} min, sd spread {sd_spread:.1f} min"
+                   + ("" if ok else "  ← every category drawn from one distribution"))
+
+
+def _arrivals_follow_a_diurnal_cycle(df: pd.DataFrame) -> Finding:
+    """Real EDs are 3-5x busier at midday than at 4am. Uniform arrivals mean
+    the hour was sampled at random."""
+    h = df["arrival_ts"].dt.hour.value_counts()
+    if len(h) < 20 or h.min() == 0:
+        return Finding("arrivals follow a diurnal cycle", True, "too few hours covered")
+    ratio = h.max() / h.min()
+    ok = ratio >= 2.0
+    return Finding("arrivals follow a diurnal cycle", ok,
+                   f"peak/trough {ratio:.2f}x (real EDs 3-5x)"
+                   + ("" if ok else "  ← arrival hour looks uniformly random"))
+
+
 def _acuity_mix_plausible(df: pd.DataFrame) -> Finding:
     """AIHW national: roughly 1% ATS 1, and 3+4 dominate."""
     mix = df["ats"].value_counts(normalize=True)
@@ -198,6 +236,8 @@ CHECKS = [
     _timestamps_are_ordered,
     _arrivals_per_day_plausible,
     _wait_varies_with_acuity,
+    _wait_distribution_differs_by_acuity,
+    _arrivals_follow_a_diurnal_cycle,
     _resus_seen_immediately,
     _admission_is_probabilistic,
     _acuity_mix_plausible,
