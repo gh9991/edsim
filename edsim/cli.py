@@ -189,6 +189,19 @@ def cmd_qc(args):
     print(dataqc.report(df))
 
 
+def cmd_artefacts(args):
+    """The five cross-record checks, in reading order. Run this first on any
+    new extract - a failure here rules out whole categories of analysis, so it
+    is cheaper to know before designing around them."""
+    from edsim import artefacts
+    from edsim.loaders import portal
+    ed = portal.load_eddc(args.eddc, strict=False)
+    hm = portal.load_hmdc(args.hmdc) if args.hmdc else None
+    print(f"\n{len(ed):,} ED presentations"
+          + (f", {len(hm):,} admissions" if hm is not None else "") + "\n")
+    print(artefacts.report(ed, hm))
+
+
 def cmd_demo(args):
     """End-to-end smoke test with zero downloads."""
     from edsim.calibrate import SimParams
@@ -259,6 +272,12 @@ def main(argv=None) -> int:
     s.add_argument("--seed", type=int, default=7)
     s.add_argument("--cohort-size", type=int, default=150, dest="cohort_size")
     s.set_defaults(func=cmd_information_value)
+
+    s = sub.add_parser("artefacts",
+                       help="the five cross-record checks - run first on a new extract")
+    s.add_argument("--eddc", required=True)
+    s.add_argument("--hmdc")
+    s.set_defaults(func=cmd_artefacts)
 
     s = sub.add_parser("qc", help="health-check an extract for generator artefacts")
     s.add_argument("--source", default="portal",
