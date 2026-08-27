@@ -19,7 +19,8 @@ SITES = ("A", "B")
 PRIORITY_SCALE = {1: 1, 2: 5, 3: 20, 4: 45, 5: 70}
 
 
-def _ed(n=20_000, *, prioritised=False, congested=False, clustered=False, seed=0):
+def _ed(n=20_000, *, prioritised=False, congested=False, clustered=False,
+        blocked=False, seed=0):
     """An ED extract carrying only the relationships asked for.
 
     Arrival rate varies by day and by site, so time-of-day and hospital are
@@ -72,6 +73,25 @@ def _ed(n=20_000, *, prioritised=False, congested=False, clustered=False, seed=0
         df["wait_to_treat_min"] = df.wait_to_treat_min + 1.5 * occ * (df.ats - 2).clip(lower=0)
     df["depart_ts"] = df.arrival_ts + pd.to_timedelta(
         df.wait_to_treat_min + df.los, "m")
+
+    # a third of visits ask for a ward bed once treatment is done, and only
+    # then start waiting - the request comes first and the wait delays leaving,
+    # so build it in that order or the two decorrelate
+    asks = rng.random(len(df)) < 0.35
+    req = df.depart_ts
+    board = rng.exponential(90, len(df))
+    if blocked:
+        # wards fill and empty through the day, so everyone whose bed is
+        # requested while they are full waits together - access block belongs
+        # to the hospital at a moment, not to the patient
+        block = (req.dt.floor("4h").astype("int64") // (10 ** 9 * 14400)
+                 + df.site.map({s: i * 7919 for i, s in enumerate(SITES)}))
+        pressure = pd.Series(block).map(
+            dict(zip(block.unique(),
+                     rng.random(block.nunique()) ** 2))).values
+        board = board * (0.2 + 8 * pressure)
+    df["bed_request_ts"] = req.where(asks)
+    df["depart_ts"] = req + pd.to_timedelta(np.where(asks, board, 0), "m")
     return df.drop(columns="los")
 
 
@@ -213,23 +233,49 @@ def test_revisit_is_independent_of_the_observation_window():
     assert abs(full - part) < 0.35
 
 
+# --- 6 boarding -----------------------------------------------------------
+
+def test_boarding_found_when_the_ward_blocks_for_everyone_at_once():
+    r = artefacts.check_boarding(_ed(n=40_000, blocked=True))
+    assert r.preserved
+    assert "median boarding" in r.statistic
+
+
+def test_boarding_missing_when_each_wait_is_drawn_alone():
+    assert not artefacts.check_boarding(_ed(n=40_000)).preserved
+
+
+def test_boarding_abstains_without_a_bed_request_timestamp():
+    ed = _ed(n=40_000, blocked=True).drop(columns="bed_request_ts")
+    r = artefacts.check_boarding(ed)
+    assert r.preserved and "not checkable" in r.statistic
+
+
+def test_boarding_is_a_different_question_from_queueing():
+    """Check 2 is the wait to be seen, check 6 the wait for a bed. A dataset
+    can keep one and lose the other, so neither may stand in for the other."""
+    ed = _ed(n=40_000, congested=True, blocked=False)
+    assert artefacts.check_queueing(ed).preserved
+    assert not artefacts.check_boarding(ed).preserved
+
+
 # --- the suite as a whole --------------------------------------------------
 
 def test_report_runs_without_hmdc():
     """Without admissions data, checks 3 and 4 are skipped rather than failed -
     an extract we cannot test is not the same as one that fails the test."""
-    ed = _ed(prioritised=True, congested=True, clustered=True)
+    ed = _ed(n=40_000, prioritised=True, congested=True, clustered=True,
+             blocked=True)
     numbered = [a.n for a in artefacts.run_all(ed, None)]
-    assert numbered == [1, 2, 5]
-    assert artefacts.report(ed, None).endswith("3/3 preserved")
+    assert numbered == [1, 2, 5, 6]
 
 
 def test_report_orders_by_number_and_counts_survivors():
-    ed = _ed(prioritised=True, congested=True, clustered=True)
-    res = artefacts.run_all(ed, _hm(ed, linked=True, sequenced=True))
-    assert [a.n for a in res] == [1, 2, 3, 4, 5]
-    assert artefacts.report(ed, _hm(ed, linked=True, sequenced=True)).endswith(
-        "5/5 preserved")
+    ed = _ed(n=40_000, prioritised=True, congested=True, clustered=True,
+             blocked=True)
+    hm = _hm(ed, linked=True, sequenced=True)
+    assert [a.n for a in artefacts.run_all(ed, hm)] == [1, 2, 3, 4, 5, 6]
+    assert artefacts.report(ed, hm).endswith("6/6 preserved")
 
 
 def test_checks_abstain_rather_than_guess_on_tiny_inputs():

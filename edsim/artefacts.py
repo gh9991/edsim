@@ -16,6 +16,7 @@ early tells you to stop planning work that cannot be done.
   3  event_linkage     does an ED visit connect to the admission it caused?
   4  sequence          do care phases follow one another within a stay?
   5  revisit           do unresolved visits bring people back?
+  6  boarding          is waiting for a ward bed a shared condition?
 
 Every check compares against a null rather than against intuition - a pooled
 distribution, a stripped-away confounder, an unambiguous subset, a marginal
@@ -218,12 +219,66 @@ def check_revisit(ed: pd.DataFrame) -> Artefact:
         blocks="return-visit quality indicators, care-continuity analysis")
 
 
+def check_boarding(ed: pd.DataFrame, window_min: float = 120) -> Artefact:
+    """6. When a hospital has no ward beds, does everyone waiting feel it?
+
+    Access block is a shared condition, not a private one. If the wards are
+    full at six in the evening, every patient whose bed was requested around
+    then waits, and their waits move together. So compare each boarding time
+    against the mean of everyone else who asked for a bed at the same hospital
+    within a couple of hours. In a real queue this correlation runs +0.8 or
+    higher - our own simulator gives +0.80 to +0.95 depending on ward
+    occupancy. Drawn independently per record it sits at zero.
+
+    This is a separate question from check 2. That one asks whether the wait to
+    be *seen* responds to crowding; this asks whether the wait for a *bed*
+    does. An extract can plausibly keep one and lose the other, and the two
+    block different work.
+    """
+    need = {"bed_request_ts", "depart_ts", "site"}
+    if not need <= set(ed.columns):
+        return Artefact(6, "boarding", "is waiting for a bed shared?",
+                        True, "not checkable - no bed-request timestamp")
+    b = ed.dropna(subset=["bed_request_ts", "depart_ts"]).copy()
+    b["board"] = (b.depart_ts - b.bed_request_ts).dt.total_seconds() / 60
+    b = b[(b.board >= 0) & (b.board < 3000)]
+    if len(b) < 5000:
+        return Artefact(6, "boarding", "is waiting for a bed shared?",
+                        True, "not checkable - too few boarding episodes")
+    rs, ws = [], []
+    for _, g in b.groupby("site"):
+        if len(g) < 3000:
+            continue
+        g = g.sort_values("bed_request_ts")
+        t = g.bed_request_ts.values.astype("datetime64[m]").astype(float)
+        y = g.board.values
+        cs = np.concatenate([[0.0], np.cumsum(y)])
+        lo = np.searchsorted(t, t - window_min)
+        hi = np.searchsorted(t, t + window_min)
+        cnt = hi - lo - 1                       # everyone else in the window
+        others = np.where(cnt > 0, (cs[hi] - cs[lo] - y) / np.maximum(cnt, 1), np.nan)
+        m = cnt >= 3
+        if m.sum() > 1000 and np.std(others[m]) > 0:
+            rs.append(float(np.corrcoef(others[m], y[m])[0, 1]))
+            ws.append(int(m.sum()))
+    if not rs:
+        return Artefact(6, "boarding", "is waiting for a bed shared?",
+                        True, "not checkable - no hospital busy enough")
+    r = float(np.average(rs, weights=ws))
+    return Artefact(
+        6, "boarding", "is waiting for a bed shared?",
+        preserved=r > 0.2,
+        statistic=f"corr(neighbours\' boarding, own) = {r:+.3f} over {len(rs)} hospitals, "
+                  f"median boarding {b.board.median():.0f} min  [real queue: +0.80 to +0.95]",
+        blocks="access-block drivers, ward-discharge timing, anything predicting how long a bed takes")
+
+
 def run_all(ed: pd.DataFrame, hm: pd.DataFrame | None = None) -> list[Artefact]:
     """The five checks, in the order they should be read."""
     out = [check_priority(ed), check_queueing(ed)]
     if hm is not None:
         out += [check_event_linkage(ed, hm), check_sequence(hm)]
-    out.append(check_revisit(ed))
+    out += [check_revisit(ed), check_boarding(ed)]
     return sorted(out, key=lambda a: a.n)
 
 
