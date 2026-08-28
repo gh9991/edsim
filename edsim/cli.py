@@ -202,6 +202,21 @@ def cmd_artefacts(args):
     print(artefacts.report(ed, hm))
 
 
+def cmd_replay(args):
+    """Recompute what the recorded patients would have waited in a real queue."""
+    from edsim import replay
+    from edsim.loaders import portal
+    ed = portal.load_eddc(args.eddc, strict=False)
+    if args.site:
+        ed = ed[ed.site == args.site]
+    out = replay.sweep(ed, beds=args.beds or None)
+    print(f"\n{len(ed):,} presentations; offered load "
+          f"{out.attrs['offered_load']:.1f} spaces\n")
+    print(out.to_string(float_format=lambda x: f"{x:,.3f}"))
+    print("\nCapacity is not in the extract and cannot be fitted to the recorded"
+          "\nwaits - those did not come from a queue. Take it from the hospital.")
+
+
 def cmd_demo(args):
     """End-to-end smoke test with zero downloads."""
     from edsim.calibrate import SimParams
@@ -278,6 +293,13 @@ def main(argv=None) -> int:
     s.add_argument("--eddc", required=True)
     s.add_argument("--hmdc")
     s.set_defaults(func=cmd_artefacts)
+
+    s = sub.add_parser("replay",
+                       help="recompute waits by making real patients share beds")
+    s.add_argument("--eddc", required=True)
+    s.add_argument("--site", type=int)
+    s.add_argument("--beds", type=int, nargs="*")
+    s.set_defaults(func=cmd_replay)
 
     s = sub.add_parser("qc", help="health-check an extract for generator artefacts")
     s.add_argument("--source", default="portal",
