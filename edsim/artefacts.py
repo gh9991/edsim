@@ -17,6 +17,7 @@ early tells you to stop planning work that cannot be done.
   4  sequence          do care phases follow one another within a stay?
   5  revisit           do unresolved visits bring people back?
   6  boarding          is waiting for a ward bed a shared condition?
+  7  ward_pressure     does a full hospital keep its inpatients longer?
 
 Every check compares against a null rather than against intuition - a pooled
 distribution, a stripped-away confounder, an unambiguous subset, a marginal
@@ -283,11 +284,62 @@ def check_boarding(ed: pd.DataFrame, window_min: float = 120) -> Artefact:
         blocks="access-block drivers, ward-discharge timing, anything predicting how long a bed takes")
 
 
+def check_ward_pressure(hm: pd.DataFrame) -> Artefact:
+    """7. Does a full hospital change how long its inpatients stay?
+
+    The inpatient counterpart of check 2. A ward under pressure discharges
+    sooner - the round runs earlier, the marginal patient goes home a day
+    early, the step-down bed is found. So occupancy at admission and length of
+    stay should move together; the sign can go either way depending on whether
+    pressure shortens stays or blocked discharges lengthen them, but zero means
+    the hospital's state reached nobody.
+
+    Kept separate from check 2 because the two files are generated separately:
+    an extract can carry ED dynamics and no ward dynamics, or the reverse.
+    """
+    need = {"admission_ts", "separation_ts", "site"}
+    if not need <= set(hm.columns):
+        return Artefact(7, "ward_pressure", "does a full hospital hold patients longer?",
+                        True, "not checkable - missing columns")
+    h = hm.dropna(subset=["admission_ts", "separation_ts"]).copy()
+    h["los"] = (h.separation_ts - h.admission_ts).dt.total_seconds() / 86400
+    h = h[(h.los >= 0) & (h.los < 365)]
+    if len(h) < 5000:
+        return Artefact(7, "ward_pressure", "does a full hospital hold patients longer?",
+                        True, "not checkable - too few admissions")
+    rs, ws = [], []
+    for _, g in h.groupby("site"):
+        if len(g) < 3000:
+            continue
+        g = g.reset_index(drop=True)
+        a = g.admission_ts.values.astype("datetime64[h]").astype(float)
+        sep = g.separation_ts.values.astype("datetime64[h]").astype(float)
+        occ = (np.searchsorted(np.sort(a), a, "right")
+               - np.searchsorted(np.sort(sep), a, "left"))
+        if np.std(occ) > 0:
+            rs.append(float(np.corrcoef(occ, g.los)[0, 1]))
+            ws.append(len(g))
+    if not rs:
+        return Artefact(7, "ward_pressure", "does a full hospital hold patients longer?",
+                        True, "not checkable - no hospital large enough")
+    r = float(np.average(rs, weights=ws))
+    dow = h.admission_ts.dt.dayofweek.value_counts(normalize=True)
+    weekday = float(dow.reindex(range(5)).sum() / 5 / (dow.reindex([5, 6]).sum() / 2))
+    return Artefact(
+        7, "ward_pressure", "does a full hospital hold patients longer?",
+        preserved=abs(r) > 0.05,
+        statistic=f"corr(occupancy at admission, length of stay) = {r:+.3f} over "
+                  f"{len(rs)} hospitals; weekday/weekend admissions {weekday:.2f}x "
+                  f"(real hospitals run 1.3-1.8x)",
+        blocks="ward-pressure effects on discharge, step-down planning, the downstream half of any flow model")
+
+
 def run_all(ed: pd.DataFrame, hm: pd.DataFrame | None = None) -> list[Artefact]:
     """The five checks, in the order they should be read."""
     out = [check_priority(ed), check_queueing(ed)]
     if hm is not None:
-        out += [check_event_linkage(ed, hm), check_sequence(hm)]
+        out += [check_event_linkage(ed, hm), check_sequence(hm),
+                check_ward_pressure(hm)]
     out += [check_revisit(ed), check_boarding(ed)]
     return sorted(out, key=lambda a: a.n)
 

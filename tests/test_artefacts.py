@@ -95,7 +95,8 @@ def _ed(n=20_000, *, prioritised=False, congested=False, clustered=False,
     return df.drop(columns="los")
 
 
-def _hm(ed, *, linked=False, sequenced=False, repeats=False, seed=1):
+def _hm(ed, *, linked=False, sequenced=False, repeats=False, pressured=False,
+        seed=1):
     """One admission per patient, either following their ED visit or not."""
     rng = np.random.default_rng(seed)
     one = ed.drop_duplicates("patient_id")
@@ -104,10 +105,19 @@ def _hm(ed, *, linked=False, sequenced=False, repeats=False, seed=1):
            else T0 + pd.to_timedelta(rng.integers(0, 364, n), "D"))
     rows = pd.DataFrame({"patient_id": one.patient_id.values,
                          "admission_ts": pd.Series(adm).values,
+                         "site": one.site.values,
                          "care_type": rng.choice([21, 22], n, p=[.9, .1]),
                          "admission_status": 6})
-    rows["separation_ts"] = rows.admission_ts + pd.to_timedelta(
-        rng.exponential(4, n), "D")
+    los = rng.exponential(4, n)
+    if pressured:      # a fuller ward holds its patients longer
+        a = rows.admission_ts.values.astype("datetime64[h]").astype(float)
+        occ = np.zeros(n)
+        for _, g in rows.groupby("site"):
+            aa = a[g.index]
+            occ[g.index] = (np.searchsorted(np.sort(aa), aa, "right")
+                            - np.searchsorted(np.sort(aa + los[g.index] * 24), aa, "left"))
+        los = np.clip(los * (1 + 0.03 * (occ - occ.mean())), 0.1, None)
+    rows["separation_ts"] = rows.admission_ts + pd.to_timedelta(los, "D")
     if repeats:     # readmitted months later, keeping the person's own type -
         again = rows.sample(frac=0.4, random_state=2).copy()   # not a handover
         again["admission_ts"] += pd.to_timedelta(rng.integers(30, 200, len(again)), "D")
@@ -273,9 +283,9 @@ def test_report_runs_without_hmdc():
 def test_report_orders_by_number_and_counts_survivors():
     ed = _ed(n=40_000, prioritised=True, congested=True, clustered=True,
              blocked=True)
-    hm = _hm(ed, linked=True, sequenced=True)
-    assert [a.n for a in artefacts.run_all(ed, hm)] == [1, 2, 3, 4, 5, 6]
-    assert artefacts.report(ed, hm).endswith("6/6 preserved")
+    hm = _hm(ed, linked=True, sequenced=True, pressured=True)
+    assert [a.n for a in artefacts.run_all(ed, hm)] == [1, 2, 3, 4, 5, 6, 7]
+    assert artefacts.report(ed, hm).endswith("7/7 preserved")
 
 
 def test_checks_abstain_rather_than_guess_on_tiny_inputs():
@@ -283,3 +293,60 @@ def test_checks_abstain_rather_than_guess_on_tiny_inputs():
     tiny = _ed(n=300, prioritised=False, congested=False, clustered=False)
     for a in artefacts.run_all(tiny, None):
         assert a.preserved and "not checkable" in a.statistic
+
+
+# --- 7 ward pressure -------------------------------------------------------
+
+def _ward(n=30_000, *, pressured=False, seed=5):
+    """Admissions at two hospitals, with or without occupancy affecting stay."""
+    rng = np.random.default_rng(seed)
+    site = rng.choice(list(SITES), n)
+    adm = (T0 + pd.to_timedelta(rng.integers(0, 364, n), "D")
+           + pd.to_timedelta(rng.integers(0, 24, n), "h"))
+    # an elective list pulls weekend admissions back onto the Friday; derive
+    # the day from the timestamp rather than arithmetic on the offset, since
+    # 1 January 2022 was a Saturday and day % 7 does not mean what it looks like
+    move = (adm.dayofweek >= 5) & (rng.random(n) < 0.55)
+    back = np.clip(adm.dayofweek.to_numpy() - 4, 0, None)
+    adm = adm - pd.to_timedelta(np.where(move, back, 0), "D")
+    los = rng.exponential(4, n)
+    df = pd.DataFrame({"patient_id": np.arange(n), "admission_ts": adm,
+                       "site": site, "los": los})
+    if pressured:
+        df = df.sort_values(["site", "admission_ts"]).reset_index(drop=True)
+        occ = np.zeros(len(df))
+        for _, g in df.groupby("site"):
+            a = g.admission_ts.values.astype("datetime64[h]").astype(float)
+            out = a + g.los.values * 24
+            occ[g.index] = (np.searchsorted(np.sort(a), a, "right")
+                            - np.searchsorted(np.sort(out), a, "left"))
+        df["los"] = df.los * (1 + 0.02 * (occ - occ.mean()))   # fuller -> longer
+        df["los"] = df.los.clip(lower=0.1)
+    df["separation_ts"] = df.admission_ts + pd.to_timedelta(df.los, "D")
+    return df.drop(columns="los")
+
+
+def test_ward_pressure_found_when_a_full_hospital_holds_patients():
+    r = artefacts.check_ward_pressure(_ward(pressured=True))
+    assert r.preserved
+    assert "weekday/weekend" in r.statistic
+
+
+def test_ward_pressure_missing_when_stays_ignore_the_hospital():
+    assert not artefacts.check_ward_pressure(_ward()).preserved
+
+
+def test_ward_pressure_abstains_without_timestamps():
+    w = _ward().drop(columns="separation_ts")
+    r = artefacts.check_ward_pressure(w)
+    assert r.preserved and "not checkable" in r.statistic
+
+
+def test_ward_pressure_reports_the_weekday_rhythm_separately():
+    """A weekday bias is a property of one row - a generator can reproduce the
+    calendar and still miss the physics, so the two are reported side by side
+    and only the correlation decides the verdict."""
+    r = artefacts.check_ward_pressure(_ward())
+    weekday = float(r.statistic.split("admissions ")[1].split("x")[0])
+    assert weekday > 1.1                      # calendar rhythm present
+    assert not r.preserved                    # physics still absent
