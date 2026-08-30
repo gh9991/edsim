@@ -277,15 +277,17 @@ def test_report_runs_without_hmdc():
     ed = _ed(n=40_000, prioritised=True, congested=True, clustered=True,
              blocked=True)
     numbered = [a.n for a in artefacts.run_all(ed, None)]
-    assert numbered == [1, 2, 5, 6]
+    assert numbered == [1, 2, 5, 6, 8]
 
 
 def test_report_orders_by_number_and_counts_survivors():
     ed = _ed(n=40_000, prioritised=True, congested=True, clustered=True,
              blocked=True)
     hm = _hm(ed, linked=True, sequenced=True, pressured=True)
-    assert [a.n for a in artefacts.run_all(ed, hm)] == [1, 2, 3, 4, 5, 6, 7]
-    assert artefacts.report(ed, hm).endswith("7/7 preserved")
+    assert [a.n for a in artefacts.run_all(ed, hm)] == [1, 2, 3, 4, 5, 6, 7, 8]
+    # check 8 abstains here - this fixture carries no diagnosis chapter - and an
+    # abstention counts as preserved, so the tally is still complete
+    assert artefacts.report(ed, hm).endswith("8/8 preserved")
 
 
 def test_checks_abstain_rather_than_guess_on_tiny_inputs():
@@ -350,3 +352,64 @@ def test_ward_pressure_reports_the_weekday_rhythm_separately():
     weekday = float(r.statistic.split("admissions ")[1].split("x")[0])
     assert weekday > 1.1                      # calendar rhythm present
     assert not r.preserved                    # physics still absent
+
+
+# --- 8 clock, not count ----------------------------------------------------
+
+CHAPTERS = ["S0", "R0", "Z0", "J0", "I0", "F0", "A0", "K0", "M0", "N0"]
+CH_P = np.array([.28, .19, .10, .09, .06, .06, .06, .06, .05, .05])
+
+
+def _three(n=12_000, *, drifts_with_time=False, drifts_with_position=False, seed=9):
+    """Three visits each. Concordance can be made to depend on the gap between
+    two visits, on which visit it is, both, or neither."""
+    rng = np.random.default_rng(seed)
+    theta = rng.choice(len(CHAPTERS), n, p=CH_P)
+    rows = []
+    t = T0 + pd.to_timedelta(rng.integers(0, 120, n), "D")
+    for pos in range(3):
+        gap = rng.exponential(90, n) + 1
+        t = t + pd.to_timedelta(gap, "D")
+        follow = np.full(n, 0.35)
+        if drifts_with_time:                 # close together -> same problem
+            follow = np.clip(0.75 - gap / 220, 0.10, 0.75)
+        if drifts_with_position and pos == 0:
+            follow = follow * 0.35           # the opening visit follows less
+        use = rng.random(n) < follow
+        ch = np.where(use, theta, rng.choice(len(CHAPTERS), n, p=CH_P))
+        rows.append(pd.DataFrame({"patient_id": np.arange(n), "arrival_ts": t,
+                                  "diagnosis_chapter": [CHAPTERS[i] for i in ch]}))
+    return pd.concat(rows, ignore_index=True)
+
+
+def test_clock_found_when_agreement_falls_with_the_gap_alone():
+    r = artefacts.check_clock_not_count(_three(drifts_with_time=True))
+    assert r.preserved
+
+
+def test_clock_missing_when_visit_position_moves_agreement():
+    """The body has no idea which visit this is - if position matters once the
+    gap is held fixed, something other than physiology is deciding."""
+    r = artefacts.check_clock_not_count(
+        _three(drifts_with_time=True, drifts_with_position=True))
+    assert not r.preserved
+    assert "visit position" in r.statistic
+
+
+def test_clock_missing_when_time_does_not_move_agreement():
+    assert not artefacts.check_clock_not_count(_three()).preserved
+
+
+def test_clock_abstains_without_a_diagnosis_chapter():
+    r = artefacts.check_clock_not_count(
+        _three(drifts_with_time=True).drop(columns="diagnosis_chapter"))
+    assert r.preserved and "not checkable" in r.statistic
+
+
+def test_clock_ignores_rows_coded_missing():
+    """'Missing' is a data-completeness pattern concentrated in first visits;
+    counting it as a chapter would manufacture a positional effect."""
+    d = _three(drifts_with_time=True)
+    first = d.sort_values(["patient_id", "arrival_ts"]).groupby("patient_id").head(1).index
+    d.loc[first[:3000], "diagnosis_chapter"] = "Missing"
+    assert artefacts.check_clock_not_count(d).preserved

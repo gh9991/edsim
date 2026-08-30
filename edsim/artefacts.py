@@ -18,6 +18,7 @@ early tells you to stop planning work that cannot be done.
   5  revisit           do unresolved visits bring people back?
   6  boarding          is waiting for a ward bed a shared condition?
   7  ward_pressure     does a full hospital keep its inpatients longer?
+  8  clock_not_count   does a body drift with time, or with visit number?
 
 Every check compares against a null rather than against intuition - a pooled
 distribution, a stripped-away confounder, an unambiguous subset, a marginal
@@ -334,13 +335,75 @@ def check_ward_pressure(hm: pd.DataFrame) -> Artefact:
         blocks="ward-pressure effects on discharge, step-down planning, the downstream half of any flow model")
 
 
+def check_clock_not_count(ed: pd.DataFrame) -> Artefact:
+    """8. Does a person's condition drift with time, or with visit number?
+
+    Take everyone with exactly three visits. That gives two adjacent pairs -
+    first-to-second and second-to-third - and asks how often each pair carries
+    the same diagnosis. Both are adjacent, so once they are matched on the time
+    between them, any remaining difference is position alone: being someone's
+    opening visit rather than their second.
+
+    A body has no idea which ED visit this is. It only knows how long it has
+    been. So in real data the two adjacent pairs agree equally at every gap -
+    MIMIC gives 40.3% against 42.0% inside a month, and holds that out to a
+    year. Row-wise generation is the other way round: the loop knows t and not
+    the clock, so position separates the pairs while time barely moves them.
+
+    The verdict needs no threshold on the association itself - only that the
+    two positions behave alike once the clock is held still.
+    """
+    need = {"patient_id", "arrival_ts", "diagnosis_chapter"}
+    if not need <= set(ed.columns):
+        return Artefact(8, "clock_not_count", "does the body drift with time or with visit number?",
+                        True, "not checkable - no diagnosis chapter")
+    d = ed.dropna(subset=["arrival_ts", "diagnosis_chapter"]).copy()
+    d = d[d.diagnosis_chapter.astype(str).str.lower() != "missing"]
+    d = d.sort_values(["patient_id", "arrival_ts"])
+    n_visits = d.groupby("patient_id").patient_id.transform("size")
+    d = d[n_visits == 3]
+    if d.patient_id.nunique() < 2000:
+        return Artefact(8, "clock_not_count", "does the body drift with time or with visit number?",
+                        True, "not checkable - too few patients with three visits")
+    g = d.groupby("patient_id")
+    v = [g.nth(i).reset_index(drop=True) for i in range(3)]
+    days = lambda a, b: (b.arrival_ts - a.arrival_ts).dt.total_seconds() / 86400
+    early = pd.DataFrame({"same": (v[0].diagnosis_chapter.values == v[1].diagnosis_chapter.values),
+                          "gap": days(v[0], v[1]).values})
+    late = pd.DataFrame({"same": (v[1].diagnosis_chapter.values == v[2].diagnosis_chapter.values),
+                         "gap": days(v[1], v[2]).values})
+    edges = [0, 30, 90, 180, 10 ** 5]
+    gaps, wts = [], []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        a = early[(early.gap >= lo) & (early.gap < hi)]
+        b = late[(late.gap >= lo) & (late.gap < hi)]
+        if len(a) > 300 and len(b) > 300:
+            gaps.append(abs(a.same.mean() - b.same.mean()))
+            wts.append(min(len(a), len(b)))
+    if not gaps:
+        return Artefact(8, "clock_not_count", "does the body drift with time or with visit number?",
+                        True, "not checkable - too few pairs per time band")
+    positional = float(np.average(gaps, weights=wts)) * 100
+    near = early[early.gap < 30].same.mean() if (early.gap < 30).sum() > 300 else float("nan")
+    far = early[early.gap >= 180].same.mean() if (early.gap >= 180).sum() > 300 else float("nan")
+    decay = (near - far) * 100
+    return Artefact(
+        8, "clock_not_count", "does the body drift with time or with visit number?",
+        preserved=positional < 3.0 and decay > 3.0,
+        statistic=f"holding the gap fixed, visit position still moves agreement by "
+                  f"{positional:.1f} pp (real: ~1); agreement falls {decay:+.1f} pp "
+                  f"from under a month to over six (real: ~14)",
+        blocks="anything contrasting index with repeat presentations, and every "
+               "time-since-last-visit feature")
+
+
 def run_all(ed: pd.DataFrame, hm: pd.DataFrame | None = None) -> list[Artefact]:
     """The five checks, in the order they should be read."""
     out = [check_priority(ed), check_queueing(ed)]
     if hm is not None:
         out += [check_event_linkage(ed, hm), check_sequence(hm),
                 check_ward_pressure(hm)]
-    out += [check_revisit(ed), check_boarding(ed)]
+    out += [check_revisit(ed), check_boarding(ed), check_clock_not_count(ed)]
     return sorted(out, key=lambda a: a.n)
 
 

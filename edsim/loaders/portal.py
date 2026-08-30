@@ -214,6 +214,12 @@ def load_eddc(path, *, strict: bool = True, needs_bed: str = "WARD_BED",
     )
     out["acuity_scale"] = "ATS"          # triage_category IS the ATS, no mapping
 
+    # The chapter is what a clinical coder assigns after the visit, so it is
+    # leakage for anything decided at triage - but it is the only clinical
+    # grouping the extract carries, and the artefact suite needs it.
+    if "_dx_chapter" in out.columns:
+        out["diagnosis_chapter"] = out.pop("_dx_chapter").astype(str).str.strip()
+
     ds_raw = (out.pop("_departure_status") if "_departure_status" in out.columns
               else pd.Series(index=out.index, dtype=float))
     ds = pd.to_numeric(ds_raw, errors="coerce")

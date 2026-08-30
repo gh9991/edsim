@@ -25,6 +25,7 @@ OPTIONAL = [
     "hr", "sbp", "dbp", "rr", "temp", "spo2", "pain",
     "disposition",
     "site",            # hospital / campus identifier
+    "diagnosis_chapter",  # ICD-10-AM chapter - coded AFTER the visit, see features.LEAKY
 ]
 
 DERIVED = ["triage_wait_min", "wait_to_treat_min", "los_min", "admitted", "ats"]
