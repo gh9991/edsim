@@ -126,6 +126,12 @@ def check_event_linkage(ed: pd.DataFrame, hm: pd.DataFrame) -> Artefact:
     dates must correlate near +1. An admission dated before the ED visit is
     impossible for a real link, which makes direction the cleanest evidence
     available - it needs no threshold and no assumption about transfer delay.
+
+    Reported against its own null: shuffling who is paired with whom gives the
+    share of backwards pairs that pure chance produces here, so the two numbers
+    can be read without knowing anything about this extract in advance. A real
+    linkage sits near zero; an independently generated pair of files sits on
+    the shuffled figure.
     """
     e1 = ed.groupby("patient_id").filter(lambda g: len(g) == 1)
     h1 = (hm.dropna(subset=["admission_ts"])
@@ -146,11 +152,15 @@ def check_event_linkage(ed: pd.DataFrame, hm: pd.DataFrame) -> Artefact:
     y = (j.admission_ts - origin).dt.total_seconds() / 86400
     r = float(np.corrcoef(x, y)[0, 1])
     neg = float((y < x).mean())
+    rng = np.random.default_rng(0)
+    yv = y.values
+    null = float(np.mean([(rng.permutation(yv) < x.values).mean() for _ in range(50)]))
     return Artefact(
         3, "event_linkage", "does a visit connect to its admission?",
         preserved=r > 0.5,
         statistic=f"corr(ED departure date, admission date) = {r:+.3f} over {len(j):,} "
-                  f"unambiguous pairs; {neg:.1%} admitted BEFORE the ED visit",
+                  f"unambiguous pairs; {neg:.1%} admitted BEFORE the ED visit "
+                  f"(shuffling the pairing gives {null:.1%}; a real linkage gives ~0%)",
         blocks="ED-to-inpatient flow, transfer timing, the value of predicting bed need early")
 
 
