@@ -53,7 +53,6 @@ EDDC_ALIASES: dict[str, list[str]] = {
     "referral_source": ["referral_source"],
     "site":        ["establishment_code"],
     "metro":       ["metropolitan_hospital_flag", "metropolitan_flag"],
-    "patient_region": ["patient_postcode_region", "postcode_region"],
     "_departure_status": ["departure_status"],
     "_dx_chapter": ["primary_diagnosis_ICD10AM_chapter"],
     "_mental_health": ["mental_health_attendance"],
@@ -72,6 +71,10 @@ HMDC_ALIASES: dict[str, list[str]] = {
     "mdc":            ["major_diagnostic_categ_current"],
     "procedure":      ["principal_procedure"],
     "site":           ["establishment_code"],
+    "metro":          ["metropolitan_hospital_flag", "metropolitan_flag"],
+    "patient_region": ["patient_postcode_region", "postcode_region"],
+    "age":            ["age"],
+    "sex":            ["sex"],
 }
 
 # ── code sets, straight out of the data dictionary ─────────────────────────
