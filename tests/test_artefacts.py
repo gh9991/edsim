@@ -284,10 +284,10 @@ def test_report_orders_by_number_and_counts_survivors():
     ed = _ed(n=40_000, prioritised=True, congested=True, clustered=True,
              blocked=True)
     hm = _hm(ed, linked=True, sequenced=True, pressured=True)
-    assert [a.n for a in artefacts.run_all(ed, hm)] == [1, 2, 3, 4, 5, 6, 7, 8]
-    # check 8 abstains here - this fixture carries no diagnosis chapter - and an
-    # abstention counts as preserved, so the tally is still complete
-    assert artefacts.report(ed, hm).endswith("8/8 preserved")
+    assert [a.n for a in artefacts.run_all(ed, hm)] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    # checks 8 and 9 abstain here - this fixture carries neither a diagnosis
+    # chapter nor a patient region - and an abstention counts as preserved
+    assert artefacts.report(ed, hm).endswith("9/9 preserved")
 
 
 def test_checks_abstain_rather_than_guess_on_tiny_inputs():
@@ -413,3 +413,52 @@ def test_clock_ignores_rows_coded_missing():
     first = d.sort_values(["patient_id", "arrival_ts"]).groupby("patient_id").head(1).index
     d.loc[first[:3000], "diagnosis_chapter"] = "Missing"
     assert artefacts.check_clock_not_count(d).preserved
+
+
+# --- 9 geography -----------------------------------------------------------
+
+REGIONS = ["metro", "north", "south", "other"]
+
+
+def _geo(n=20_000, *, people_live_near_care=False, seed=11):
+    """Admissions carrying where the patient lives and whether the hospital is
+    metropolitan. Western Australia sends many country patients to Perth, so a
+    high metro share everywhere is realistic - an identical share everywhere
+    is not."""
+    rng = np.random.default_rng(seed)
+    region = rng.choice(REGIONS, n, p=[.55, .15, .27, .03])
+    if people_live_near_care:
+        p_metro = pd.Series(region).map(
+            {"metro": .95, "north": .45, "south": .55, "other": .60}).to_numpy()
+    else:
+        p_metro = np.full(n, .76)          # same everywhere - the artefact
+    return pd.DataFrame({
+        "patient_id": np.arange(n), "patient_region": region,
+        "metro": (rng.random(n) < p_metro).astype(int),
+        "admission_ts": T0 + pd.to_timedelta(rng.integers(0, 364, n), "D")})
+
+
+def test_geography_found_when_where_you_live_predicts_where_you_are_treated():
+    r = artefacts.check_geography(_geo(people_live_near_care=True))
+    assert r.preserved
+    assert "metro" in r.statistic
+
+
+def test_geography_missing_when_every_region_looks_identical():
+    r = artefacts.check_geography(_geo())
+    assert not r.preserved
+    spread = float(r.statistic.split("spread of ")[1].split(" pp")[0])
+    assert spread < 5
+
+
+def test_geography_tolerates_a_high_metro_share_everywhere():
+    """WA really does treat many country patients in Perth. A high level is
+    not the failure - a flat one is."""
+    g = _geo(people_live_near_care=True, seed=12)
+    assert g.metro.mean() > 0.6
+    assert artefacts.check_geography(g).preserved
+
+
+def test_geography_abstains_without_a_patient_region():
+    r = artefacts.check_geography(_geo().drop(columns="patient_region"))
+    assert r.preserved and "not checkable" in r.statistic

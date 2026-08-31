@@ -19,6 +19,12 @@ early tells you to stop planning work that cannot be done.
   6  boarding          is waiting for a ward bed a shared condition?
   7  ward_pressure     does a full hospital keep its inpatients longer?
   8  clock_not_count   does a body drift with time, or with visit number?
+  9  geography         do people go to hospitals near where they live?
+
+Check 9 is the odd one out: patient location and hospital location sit in the
+same row, so it tests a within-record relationship rather than a cross-record
+one. It earns its place here because it fails the same way and closes off a
+whole line of analysis just as the others do.
 
 Every check compares against a null rather than against intuition - a pooled
 distribution, a stripped-away confounder, an unambiguous subset, a marginal
@@ -397,12 +403,52 @@ def check_clock_not_count(ed: pd.DataFrame) -> Artefact:
                "time-since-last-visit feature")
 
 
+def check_geography(hm: pd.DataFrame) -> Artefact:
+    """9. Do people go to hospitals near where they live?
+
+    Where the patient lives and where the hospital is sit side by side in one
+    admission record, so this needs no linkage at all. Western Australia sends
+    a great many country patients to Perth, so the level can legitimately be
+    high everywhere - what cannot happen is for the level to be the *same*
+    everywhere. Someone living in the metropolitan area must reach a
+    metropolitan hospital more often than someone living six hundred
+    kilometres away.
+
+    Measured as the spread between regions in the share admitted to a
+    metropolitan hospital. A few points apart means the two fields were drawn
+    without reference to one another.
+    """
+    need = {"patient_region", "metro"}
+    if not need <= set(hm.columns):
+        return Artefact(9, "geography", "do people go to hospitals near home?",
+                        True, "not checkable - no patient region or hospital flag")
+    h = hm.dropna(subset=["patient_region", "metro"])
+    if len(h) < 5000 or h.patient_region.nunique() < 2:
+        return Artefact(9, "geography", "do people go to hospitals near home?",
+                        True, "not checkable - too few records or regions")
+    share = h.groupby("patient_region").metro.mean()
+    share = share[h.groupby("patient_region").size() > 1000]
+    if len(share) < 2:
+        return Artefact(9, "geography", "do people go to hospitals near home?",
+                        True, "not checkable - too few sizeable regions")
+    spread = float(share.max() - share.min()) * 100
+    lo, hi = share.idxmin(), share.idxmax()
+    return Artefact(
+        9, "geography", "do people go to hospitals near home?",
+        preserved=spread > 15,
+        statistic=f"share admitted to a metro hospital ranges {share.min():.1%} ({lo}) "
+                  f"to {share.max():.1%} ({hi}) - a spread of {spread:.1f} pp across "
+                  f"{len(share)} regions",
+        blocks="rural-metro trajectories, catchment and travel-burden analysis, "
+               "anything about where care is delivered relative to where people live")
+
+
 def run_all(ed: pd.DataFrame, hm: pd.DataFrame | None = None) -> list[Artefact]:
     """The five checks, in the order they should be read."""
     out = [check_priority(ed), check_queueing(ed)]
     if hm is not None:
         out += [check_event_linkage(ed, hm), check_sequence(hm),
-                check_ward_pressure(hm)]
+                check_ward_pressure(hm), check_geography(hm)]
     out += [check_revisit(ed), check_boarding(ed), check_clock_not_count(ed)]
     return sorted(out, key=lambda a: a.n)
 
